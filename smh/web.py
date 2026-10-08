@@ -24,7 +24,7 @@ ZH = {"rice": "米", "cooking oil": "食用油", "eggs": "鸡蛋", "chicken": "�
       "garlic": "蒜", "bread": "面包", "potato": "马铃薯", "cabbage": "包菜", "carrot": "红萝卜", "beef": "牛肉", "salmon": "三文鱼",
       "kailan": "芥兰"}
 STORE_COLOR = {"FairPrice": "#1d4fa3", "Cold Storage": "#b3261e", "Sheng Siong": "#1f4e9a", "Giant": "#5aa832", "Prime": "#0b7a3b",
-               "Hao Mart": "#e06d22", "RedMart": "#e5394b", "Amazon Fresh": "#f08804"}
+               "Hao Mart": "#e06d22", "RedMart": "#e5394b"}
 # store -> (online shop, official logo found on the store's own website, 2026-10-08)
 STORE_INFO = {
     "FairPrice": ("https://www.fairprice.com.sg/", "https://www.fairprice.com.sg/static/icons/icon-192x192.png"),
@@ -36,7 +36,6 @@ STORE_INFO = {
     "Prime": ("https://www.primesupermarket.com/", "https://www.primesupermarket.com/wp-content/uploads/2026/08/cropped-favicon-192x192.png"),
     "Hao Mart": ("https://www.haomart.com.sg/", "https://www.haomart.com.sg/w-ebase-uploads/2021/06/hao_logo.svg"),
     "RedMart": ("https://redmart.lazada.sg/", "https://img.lazcdn.com/g/icms/images/ims-web/930f1232-e64c-47c2-88df-8e66ea34b294.png"),
-    "Amazon Fresh": ("https://www.amazon.sg/fresh", "https://www.amazon.sg/favicon.ico"),
 }
 WORDMARK = {"Cold Storage", "Sheng Siong", "Hao Mart"}   # wide logos that already spell the name: shown alone in the list
 WHY_NO_PRICES = {   # stores whose shelf prices the page cannot show, and why (see docs/vault/Scraping Playbook.md)
@@ -44,7 +43,6 @@ WHY_NO_PRICES = {   # stores whose shelf prices the page cannot show, and why (s
     "Giant": "its online shop moved to the foodpanda app",
     "Prime": "it has no online shop; its weekly flyer is read instead",
     "Hao Mart": "its online shop lists no products, even in a real browser",
-    "Amazon Fresh": "its groceries only show to signed-in Prime members",
 }
 LOGO_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/svg+xml": "svg", "image/webp": "webp", "image/x-icon": "ico",
               "image/vnd.microsoft.icon": "ico"}
@@ -52,7 +50,7 @@ EXT_TYPES = {v: k for k, v in LOGO_TYPES.items()}
 PER_STAPLE = 10   # products shown per staple: the best-value tag + a 3x3 grid, so one category fits one screen
 HOSTS = {"fairprice.com.sg": "FairPrice", "coldstorage.com.sg": "Cold Storage", "shengsiong.com.sg": "Sheng Siong",
          "giant.sg": "Giant", "primesupermarket.com": "Prime", "haomart.com.sg": "Hao Mart", "redmart.lazada.sg": "RedMart",
-         "amazon.sg": "Amazon Fresh", "lazada.sg": "RedMart"}
+         "lazada.sg": "RedMart"}
 
 
 def esc(x) -> str:
@@ -232,7 +230,8 @@ def promo_panel(staples: list[str], datas: dict, cfg: dict, new_urls: set[str], 
     cells = [cell(r, f"🆕 {s_}" if r["url"] in new_urls else s_, cfg["brands"].get(s_, []), cards.EMOJI.get(s_, "🛒"))
              for _, _, s_, r in items]
     n_new = sum(1 for t in items if not t[0])
-    sub = (f"{len(items)} promotions on your staples at FairPrice and Cold Storage" + (f" · 🆕 {n_new} new today" if n_new else "")
+    stores = sorted({t[3]["store"] for t in items}, key=lambda x: cards.STORE_ORDER.index(x) if x in cards.STORE_ORDER else 99)
+    sub = (f"{len(items)} promotions on your staples" + (f" at {', '.join(stores)}" if stores else "") + (f" · 🆕 {n_new} new today" if n_new else "")
            + " · biggest saving first · flyer deals from the other stores are on each supermarket's page")
     many = len(cells) > 15   # more than one screen: normal-height cards, the panel scrolls
     body = (f'<div class="shelf shelf-store"><div class="grid grid-store{" grid-auto" if many else ""}">{"".join(cells)}</div></div>' if cells
@@ -268,9 +267,8 @@ def store_panel(pid: str, store: str, staples: list[str], datas: dict, cfg: dict
             b = cards.best_of(mine, cfg["brands"].get(s, []))
             label = f"🏆 {s}" if b is d["winner"] else s   # the subtitle explains 🏆
             cells.append(cell(b, label, cfg["brands"].get(s, []), cards.EMOJI.get(s, "🛒")))
-    note = f" ({cards.STORE_NOTE[store]})" if store in cards.STORE_NOTE else ""
     if cells:
-        sub = f"Best value at {esc(store)}{esc(note)} for each staple · 🏆 = cheapest of all the stores"
+        sub = f"Best value at {esc(store)} for each staple · 🏆 = cheapest of all the stores"
         body = f'<div class="shelf shelf-store"><div class="grid grid-store">{"".join(cells)}</div></div>'
         extra = ""
     else:

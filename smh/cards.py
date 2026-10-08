@@ -5,10 +5,9 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Singapore")
 # every Singapore supermarket the page lists, in sidebar order; only some have prices we may read (see scrape.STORES)
-STORE_ORDER = ["FairPrice", "Cold Storage", "Sheng Siong", "Giant", "Prime", "Hao Mart", "RedMart", "Amazon Fresh"]
+STORE_ORDER = ["FairPrice", "Cold Storage", "Sheng Siong", "Giant", "Prime", "Hao Mart", "RedMart"]
 STORE_EMOJI = {"FairPrice": "🟦", "Cold Storage": "🟥", "Sheng Siong": "🟧", "Giant": "🟩", "Prime": "🟪", "Hao Mart": "🟫",
-               "RedMart": "🟥", "Amazon Fresh": "🟨"}
-STORE_NOTE = {}   # store -> what its rows cover, when it is not the whole shelf
+               "RedMart": "🟥"}
 EMOJI = {"rice": "🍚", "cooking oil": "🫒", "eggs": "🥚", "chicken": "🍗", "pork": "🥩", "fish fillet": "🐟", "prawns": "🦐",
          "choy sum": "🥬", "tofu": "🧈", "soy sauce": "🫙", "noodles": "🍜", "onion": "🧅", "garlic": "🧄", "tomato": "🍅",
          "milk": "🥛", "bread": "🍞", "potato": "🥔", "cabbage": "🥬", "carrot": "🥕", "beef": "🥩", "salmon": "🐟"}

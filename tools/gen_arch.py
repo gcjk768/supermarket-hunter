@@ -84,7 +84,7 @@ box("scrape", "<b>scrape.py</b><br>products · price per 100g · photo", 690, 29
 icon("db", "sql", "<b>prices.db</b><br>SQLite · history + photos", 755, 430, 44, pos=right(140))
 box("fj", "📰 <b>flyers.json</b><br>last flyer run", 590, 520, 110, 50, "#FFFFFF", "#888888")
 box("cfg", "📋 <b>config.json</b><br>staples + brands", 945, 430, 120, 50, "#FFFFFF", "#888888")
-box("web", "🌐 <b>web.py</b> · built-in web server<br>Promotions · 14 categories · 8 supermarkets · flyers", 600, 610, 380, 66, "#FBE3DD", "#C2391B", "fontSize=13;")
+box("web", "🌐 <b>web.py</b> · built-in web server<br>Promotions · 14 categories · 7 supermarkets · flyers", 600, 610, 380, 66, "#FBE3DD", "#C2391B", "fontSize=13;")
 icon("vault", "obsidian", "<b>Obsidian vault</b> · records every movement: refreshes, each staple, new promotions, browser fetches and blocks, flyers, logos, page visits", 490, 740, 40, pos=right(560))
 
 # ---- family ----

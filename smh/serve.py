@@ -121,14 +121,9 @@ def due(spec: str, now: datetime, last: datetime | None) -> bool:
     return last is None or last < prev
 
 
-def heartbeat(data_dir: Path) -> None:
-    (data_dir / "heartbeat").write_text(str(time.time()))
-
-
 def _wait(app: App, seconds: float) -> None:
     end = time.time() + seconds
     while (left := end - time.time()) > 0:
-        heartbeat(app.store.cfg_path.parent)
         time.sleep(min(left, 60))
 
 

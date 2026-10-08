@@ -42,7 +42,7 @@ on a laptop:
 - **🏷 Promotions** (first): every current promotion on the staples, new ones first, then the biggest saving.
 - **One screen per staple**: the best-value pack as a big price tag (★ = a brand the family trusts) and the next nine in a
   3×3 grid, cheapest per 100g first. Big ‹ previous / next › buttons (or the arrow keys) step through.
-- **By supermarket**: all eight Singapore supermarkets with their official logos (downloaded once from each store's own
+- **By supermarket**: all seven supermarkets with their official logos (downloaded once from each store's own
   website into `data/logos/`). FairPrice and Cold Storage show their best value per staple (🏆 = cheapest of all the
   stores); the others show their flyer deals, a link to their shop and the plain reason there are no shelf prices.
 - **Festive seasons** (`smh/festive.py`): about six weeks before Deepavali, Christmas, Chinese New Year, Hari Raya
@@ -65,8 +65,7 @@ visits, errors), `Items/` (one note per staple), `Stores/` (one note per superma
 - **Prime** has no online shop: its weekly flyer picture (Advertised Offers page) is read by Claude, once a day.
 - **Sheng Siong**'s shop is behind an anti-bot check, and since 2026-10-09 its flyer feed answers the NAS with the same check:
   nothing is read, never bypassed. **Giant** has no online shop any more (foodpanda app only): its promotion page only.
-- **Hao Mart**'s online shop lists no products, even in a real browser. **Amazon Fresh** groceries only show to signed-in
-  Prime members, so they are not read.
+- **Hao Mart**'s online shop lists no products, even in a real browser.
 - No stealth plugins, proxies, rotating IPs or captcha solvers. A few seconds between pages.
 
 ## Run
