@@ -136,8 +136,8 @@ def test_web_page(tmp_path):
     assert '<script>"' not in page and "&lt;script&gt;" in page and "javascript:" not in page        # scraped text escaped, only http(s) hrefs
     assert "No prices today" in page                                   # tofu has no rows
     eggs = page.split('id="s0"')[1].split('id="s1"')[0]
-    assert 1 < eggs.count('class="mini"') + 1 <= web.PER_STAPLE                    # winner + more cards, capped
-    assert "Prices checked Thursday, 08 October" in page            # the data date, not today
+    assert 1 < eggs.count('class="cell"') + 1 <= web.PER_STAPLE                    # winner + more cards, capped
+    assert "Prices checked Thu 08 Oct" in page            # the data date, not today
 
 
 def test_product_photo():
@@ -153,3 +153,18 @@ def test_relevant():
     assert scrape.relevant("Simply Finest Baby Cai Xin 300g", "choy sum")           # synonym, names no other item
     assert scrape.relevant("Blush Cocktail Truss Tomatoes 250g", "tomato")          # plural
     assert scrape.relevant("Kampong Chicken Eggs 10s", "eggs")                     # names both: kept
+
+
+def test_bought_and_top10(tmp_path):
+    from smh import web
+    st = Store(tmp_path)
+    rows = scrape.parse(MD)
+    st.save(date(2026, 10, 8), "eggs", rows)
+    u = rows[0]["url"]
+    assert st.toggle_bought(u, date(2026, 10, 8)) == {"bought": True, "times": 1}
+    assert st.toggle_bought(u, date(2026, 10, 8)) == {"bought": False, "times": 0}     # second tap same day = undo
+    st.toggle_bought(u, date(2026, 10, 7)); st.toggle_bought(u, date(2026, 10, 8)); st.toggle_bought(rows[1]["url"], date(2026, 10, 8))
+    assert [t["times"] for t in st.top_bought()] == [2, 1]
+    assert st.toggle_bought("https://evil.test/x", date(2026, 10, 8)) is None             # only products we have priced
+    st.db.close()
+    assert "bought 2×" in web.page(tmp_path)

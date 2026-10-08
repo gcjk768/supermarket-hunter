@@ -32,6 +32,9 @@ class Store:
             self.db.execute("ALTER TABLE prices ADD COLUMN image TEXT DEFAULT ''")
         self.db.execute("CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS alerts(url TEXT, promo TEXT, day TEXT, PRIMARY KEY(url, promo))")
+        # what the family actually bought (the web page's "I bought this" button): one row per product per day
+        self.db.execute("CREATE TABLE IF NOT EXISTS purchases(day TEXT, url TEXT, staple TEXT, name TEXT, price REAL, image TEXT, "
+                        "PRIMARY KEY(day, url))")
 
     # ---- promo alerts: one alert per (product, promo text), re-alert only after `days` ----
     def promo_seen(self, url: str, promo: str, today: date, days: int = 14) -> bool:
@@ -40,6 +43,31 @@ class Store:
 
     def promo_mark(self, url: str, promo: str, today: date) -> None:
         self.db.execute("INSERT OR REPLACE INTO alerts VALUES(?,?,?)", (url, promo, today.isoformat()))
+
+    # ---- purchases (family's own; feeds the Top 10 page) ----
+    def latest_row(self, url: str):
+        return self.db.execute("SELECT * FROM prices WHERE url=? ORDER BY day DESC LIMIT 1", (url,)).fetchone()
+
+    def toggle_bought(self, url: str, today: date) -> dict | None:
+        """Tap = bought today; a second tap the same day undoes it (mis-taps). Only products we have seen are accepted."""
+        row = self.latest_row(url)
+        if not row:
+            return None
+        if self.db.execute("DELETE FROM purchases WHERE day=? AND url=?", (today.isoformat(), url)).rowcount == 0:
+            self.db.execute("INSERT INTO purchases VALUES(?,?,?,?,?,?)",
+                            (today.isoformat(), url, row["query"], row["name"], row["price"], row["image"] or ""))
+            bought = True
+        else:
+            bought = False
+        times = self.db.execute("SELECT COUNT(*) n FROM purchases WHERE url=?", (url,)).fetchone()["n"]
+        return {"bought": bought, "times": times}
+
+    def bought_on(self, day: date) -> set[str]:
+        return {r["url"] for r in self.db.execute("SELECT url FROM purchases WHERE day=?", (day.isoformat(),))}
+
+    def top_bought(self, n: int = 10) -> list[dict]:
+        return [dict(r) for r in self.db.execute(
+            "SELECT url, staple, COUNT(*) times, MAX(day) last FROM purchases GROUP BY url ORDER BY times DESC, last DESC LIMIT ?", (n,))]
 
     # ---- config ----
     def config(self) -> dict:

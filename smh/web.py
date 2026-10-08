@@ -1,12 +1,12 @@
-"""Family web page: today's best buys per staple, big type, one tap to the shop's product page.
-Rendered live from data/prices.db (+ data/flyers.json from the last flyer run) on every request. Read-only, stdlib only.
+"""Family web page: one category per screen (best value + 9 more), a Top 10 of what the family bought, flyers.
+Rendered live from data/prices.db (+ data/flyers.json from the last flyer run) on every request. Stdlib only.
+The only write is POST /bought (the "I bought this" button), which accepts a product URL we already have a price for.
 Env: WEB_PORT (default 8000 inside the container; 0 = off)."""
 from __future__ import annotations
 
 import html
 import json
 import logging
-import os
 import threading
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,9 +22,10 @@ ZH = {"rice": "米", "cooking oil": "食用油", "eggs": "鸡蛋", "chicken": "�
       "garlic": "蒜", "bread": "面包", "potato": "马铃薯", "cabbage": "包菜", "carrot": "红萝卜", "beef": "牛肉", "salmon": "三文鱼",
       "kailan": "芥兰"}
 STORE_COLOR = {"FairPrice": "#1d4fa3", "Cold Storage": "#b3261e", "Sheng Siong": "#d9731a", "Giant": "#2f7d3b", "Prime": "#6b3fa0"}
-PER_STAPLE = 10   # products shown per staple ("up to 10 per category")
+PER_STAPLE = 10   # products shown per staple: the best-value tag + a 3x3 grid, so one category fits one screen
 HOSTS = {"fairprice.com.sg": "FairPrice", "coldstorage.com.sg": "Cold Storage", "shengsiong.com.sg": "Sheng Siong",
          "giant.sg": "Giant"}
+MAX_BODY = 4096
 
 
 def esc(x) -> str:
@@ -42,7 +43,7 @@ def store_of(url: str) -> str:
 
 
 def staple_data(st: Store, staple: str, brands: list[str]) -> dict | None:
-    """Latest saved rows for one staple -> winner, best per store, one deal, price change, 8-week low."""
+    """Latest saved rows for one staple -> winner, best per store, one deal, the rest, price change, 8-week low."""
     day = st.db.execute("SELECT MAX(day) d FROM prices WHERE query=?", (staple,)).fetchone()["d"]
     if not day:
         return None
@@ -70,8 +71,8 @@ def change(now: float | None, prev: float | None) -> str:
         return '<span class="chg new">NEW</span>' if now is not None else ""
     d = now - prev
     if abs(d) < 0.005:
-        return '<span class="chg same">same as last time</span>'
-    return f'<span class="chg {"down" if d < 0 else "up"}">{"▼ cheaper" if d < 0 else "▲ dearer"} {cards.money(abs(d))}</span>'
+        return '<span class="chg same">same</span>'
+    return f'<span class="chg {"down" if d < 0 else "up"}">{"▼" if d < 0 else "▲"} {cards.money(abs(d))}</span>'
 
 
 def deal_text(r: dict) -> str:
@@ -79,119 +80,198 @@ def deal_text(r: dict) -> str:
     return " · ".join(bits)
 
 
-def photo(r: dict, cls: str) -> str:
-    """Product photo from the shop's own image server; no referrer (the page lives on the LAN), hidden if it fails to load."""
-    if not (r.get("image") or "").startswith("https://"):
+def photo(r: dict, cls: str, em: str) -> str:
+    """Product photo from the shop's own image server (no referrer: the page lives on the LAN); the staple emoji if none."""
+    if (r.get("image") or "").startswith("https://"):
+        return (f'<img class="{cls}" src="{esc(r["image"])}" alt="" loading="lazy" referrerpolicy="no-referrer" '
+                f'onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),{{className:\'{cls} emoji\',textContent:\'{em}\'}}))">')
+    return f'<span class="{cls} emoji" aria-hidden="true">{em}</span>'
+
+
+def buy_button(url: str, bought: set[str]) -> str:
+    if safe_url(url) == "#":
         return ""
-    return (f'<img class="{cls}" src="{esc(r["image"])}" alt="{esc(r["name"])}" loading="lazy" referrerpolicy="no-referrer" '
-            f'onerror="this.remove()">')
+    on = url in bought
+    return (f'<button class="buy{" on" if on else ""}" type="button" data-url="{esc(url)}" aria-pressed="{str(on).lower()}">'
+            f'{"✓ Bought today" if on else "🧺 I bought it"}</button>')
 
 
-def small_card(r: dict, label: str, brands: list[str], em: str = "🛒") -> str:
+def cell(r: dict, label: str, brands: list[str], em: str, bought: set[str]) -> str:
+    """One product in the 3x3 grid. Row 1: photo, store, price, Open ›. Row 2: name. Row 3: per-100g + deal, I-bought-it."""
     dl = deal_text(r)
-    return (f'<a class="mini" href="{esc(safe_url(r["url"]))}" target="_blank" rel="noopener" style="--store:{STORE_COLOR.get(r["store"], "#555")}">'
-            f'{photo(r, "mini-img") or f'<span class="mini-img mini-emoji" aria-hidden="true">{em}</span>'}<span class="mini-body"><span class="mini-top"><span class="pill">{esc(r["store"])}</span><span class="mini-label">{esc(label)}</span></span>'
-            f'<span class="mini-name">{"★ " if cards.is_brand(r, brands) else ""}{esc(r["name"])}</span>'
-            f'<span class="mini-price"><b>{cards.money(r["price"])}</b> <small>{esc(cards.unit(r))}</small></span>'
-            + (f'<span class="mini-deal">{esc(dl)}</span>' if dl else "")
-            + '<span class="mini-go">Open ›</span></span></a>')
+    url = esc(safe_url(r["url"]))
+    return (f'<div class="cell" style="--store:{STORE_COLOR.get(r["store"], "#555")}">'
+            f'<a class="cell-link" href="{url}" target="_blank" rel="noopener"><span class="cell-head">{photo(r, "cell-img", em)}'
+            f'<span class="cell-hp"><span class="cell-top"><span class="pill">{esc(r["store"])}</span><span class="cell-label">{esc(label)}</span></span>'
+            f'<span class="cell-price">{cards.money(r["price"])}</span></span></span>'
+            f'<span class="cell-name">{"★ " if cards.is_brand(r, brands) else ""}{esc(r["name"])}</span></a>'
+            f'<span class="cell-actions"><span class="cell-meta">{esc(cards.unit(r))}' + (f' · <b>{esc(dl)}</b>' if dl else "") + '</span>'
+            + buy_button(r["url"], bought) + '</span></div>')
 
 
-def section(i: int, staple: str, d: dict | None, brands: list[str]) -> str:
-    em, zh = cards.EMOJI.get(staple, "🛒"), ZH.get(staple, "")
-    head = (f'<header class="sh"><span class="stamp" aria-hidden="true">{em}</span>'
-            f'<h2>{esc(staple.title())}<span class="zh">{esc(zh)}</span></h2></header>')
-    if not d:
-        return f'<section class="staple" id="s{i}" style="--i:{i}">{head}<p class="empty">No prices today. We\'ll try again tomorrow morning.</p></section>'
-    w = d["winner"]
+def tag_html(w: dict, d: dict, brands: list[str], em: str, bought: set[str], kicker: str = "Best value") -> str:
     dl = deal_text(w)
-    tag = (f'<a class="tag" href="{esc(safe_url(w["url"]))}" target="_blank" rel="noopener" style="--store:{STORE_COLOR.get(w["store"], "#555")}">'
-           f'<span class="hole" aria-hidden="true"></span>{photo(w, "tag-img") or f'<span class="tag-img tag-emoji" aria-hidden="true">{em}</span>'}'
-           f'<span class="tag-kicker">Best value {"· ★ trusted brand" if cards.is_brand(w, brands) else ""}</span>'
-           f'<span class="tag-name">{esc(w["name"])}</span>'
-           f'<span class="tag-price">{cards.money(w["price"])}</span>'
-           f'<span class="tag-unit">{esc(cards.unit(w))} {change(w["unit_price"], d["prev"])}</span>'
-           + (f'<span class="tag-deal">🏷 {esc(dl)}</span>' if dl else "")
-           + f'<span class="btn">Open at {esc(w["store"])} <span aria-hidden="true">→</span></span></a>')
-    minis = [small_card(o, "also good here", brands, em) for o in d["others"]]
-    if d["deal"]:
-        minis.append(small_card(d["deal"], "on offer", brands, em))
-    more = "".join(small_card(r, f"#{n} value", brands, em) for n, r in enumerate(d["more"], len(minis) + 2))
-    more = (f'<h3 class="more-h">More choices · cheapest per 100g first</h3><div class="carousel">'
-            f'<button class="nav prev" type="button" aria-label="Scroll left">‹</button><div class="more">{more}</div>'
-            f'<button class="nav next" type="button" aria-label="Scroll right">›</button></div>') if more else ""
-    stock = (f'<p class="stock">💰 <b>Stock up:</b> cheapest in 8 weeks (was {cards.money(d["low"])}{esc(w["unit"])})</p>'
-             if d["stock"] else "")
-    return (f'<section class="staple" id="s{i}" style="--i:{i}">{head}{stock}<div class="shelf">{tag}'
-            f'<div class="minis">{"".join(minis)}</div></div>{more}'
-            f'<p class="meta">Compared {d["count"]} products · price per 100g / 100ml / piece</p></section>')
+    url = esc(safe_url(w["url"]))
+    return (f'<div class="tag" style="--store:{STORE_COLOR.get(w["store"], "#555")}">'
+            f'<a class="tag-link" href="{url}" target="_blank" rel="noopener"><span class="hole" aria-hidden="true"></span>'
+            f'{photo(w, "tag-img", em)}'
+            f'<span class="tag-kicker">{esc(kicker)}{" · ★ trusted brand" if cards.is_brand(w, brands) else ""}</span>'
+            f'<span class="tag-name">{esc(w["name"])}</span>'
+            f'<span class="tag-price">{cards.money(w["price"])}</span>'
+            f'<span class="tag-unit">{esc(cards.unit(w))} {change(w.get("unit_price"), d.get("prev"))}</span>'
+            + (f'<span class="tag-deal">🏷 {esc(dl)}</span>' if dl else "")
+            + f'<span class="btn">Open at {esc(w["store"])} <span aria-hidden="true">→</span></span></a>'
+            + buy_button(w["url"], bought) + '</div>')
 
 
-def flyers_html(path: Path) -> str:
+def nav_buttons(prev: tuple[str, str] | None, nxt: tuple[str, str] | None) -> str:
+    """Big ‹ previous / next › category buttons: (panel id, label)."""
+    out = f'<a class="step" href="#{prev[0]}">‹ {esc(prev[1])}</a>' if prev else '<span></span>'
+    return out + (f'<a class="step" href="#{nxt[0]}">{esc(nxt[1])} ›</a>' if nxt else '<span></span>')
+
+
+def panel(pid: str, em: str, title: str, zh: str, sub: str, body: str, steps: str, extra_cls: str = "") -> str:
+    return (f'<section class="panel {extra_cls}" id="{pid}" aria-label="{esc(title)}"><header class="ph">'
+            f'<span class="stamp" aria-hidden="true">{em}</span><div class="ph-t"><h2>{esc(title)}<span class="zh">{esc(zh)}</span></h2>'
+            f'<div class="ph-sub">{sub}</div></div><nav class="steps">{steps}</nav></header>{body}</section>')
+
+
+def staple_panel(i: int, staple: str, d: dict | None, brands: list[str], bought: set[str], steps: str) -> str:
+    em, zh = cards.EMOJI.get(staple, "🛒"), ZH.get(staple, "")
+    if not d:
+        return panel(f"s{i}", em, staple.title(), zh, "", '<p class="empty">No prices today. We\'ll try again tomorrow morning.</p>', steps)
+    w = d["winner"]
+    items = [(o, "best here") for o in d["others"]] + ([(d["deal"], "on offer")] if d["deal"] else [])
+    items += [(r, f"#{n}") for n, r in enumerate(d["more"], len(items) + 2)]
+    grid = "".join(cell(r, label, brands, em, bought) for r, label in items)
+    sub = f'Compared {d["count"]} products · cheapest per 100g / 100ml / piece first'
+    if d["stock"]:
+        sub += f' <span class="stock">💰 Stock up: cheapest in 8 weeks (was {cards.money(d["low"])}{esc(w["unit"])})</span>'
+    return panel(f"s{i}", em, staple.title(), zh, sub, f'<div class="shelf">{tag_html(w, d, brands, em, bought)}<div class="grid">{grid}</div></div>', steps)
+
+
+def top_panel(st: Store, bought: set[str], steps: str) -> tuple[str, bool]:
+    top = st.top_bought(10)
+    items = []
+    for t in top:
+        row = st.latest_row(t["url"])
+        if row:
+            r = dict(row, store=store_of(row["url"]))
+            items.append(cell(r, f"bought {t['times']}×", [], cards.EMOJI.get(t["staple"], "🛒"), bought))
+    if not items:
+        body = ('<div class="empty-top"><span class="big">🧺</span><p><b>Nothing here yet.</b><br>When you buy something, open its '
+                'category and tap <b>🧺 I bought it</b>. The ten things the family buys most will show here, with today\'s price.</p></div>')
+    else:
+        body = f'<div class="grid grid-top">{"".join(items)}</div>'
+    sub = "What the family buys most, from the 🧺 I bought it button · today's price for each"
+    return panel("top", "⭐", "Top 10 bought", "最常买", sub, body, steps, "panel-scroll"), bool(items)
+
+
+def flyers_panel(path: Path, steps: str) -> str:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:   # noqa: BLE001  no flyer run yet, or a half-written file: just leave the section out
-        return ""
-    cards_ = []
+    except Exception:   # noqa: BLE001  no flyer run yet, or a half-written file
+        data = {}
+    out = []
     for src, items in data.get("sections", {}).items():
         for it in [i for i in items if i.get("staple")][:8] or items[:4]:
             r = it.get("row") or {}
             price = f'<b>{cards.money(r["price"])}</b>' if r.get("price") is not None else ""
-            cards_.append(f'<a class="flyer" href="{esc(safe_url(it.get("url", "")))}" target="_blank" rel="noopener" '
-                          f'style="--store:{STORE_COLOR.get(it.get("store"), "#555")}"><span class="pill">{esc(it.get("store", src))}</span>'
-                          f'<span class="flyer-title">{esc(it.get("title", "")[:90])}</span>'
-                          f'<span class="flyer-detail">{price} {esc(it.get("detail") or "")}</span></a>')
-    if not cards_:
-        return ""
-    return (f'<section class="flyers" id="flyers"><h2 class="band">This week\'s flyers<span class="zh">本周传单</span></h2>'
-            f'<div class="flyer-grid">{"".join(cards_)}</div></section>')
+            out.append(f'<a class="flyer" href="{esc(safe_url(it.get("url", "")))}" target="_blank" rel="noopener" '
+                       f'style="--store:{STORE_COLOR.get(it.get("store"), "#555")}"><span class="pill">{esc(it.get("store", src))}</span>'
+                       f'<span class="flyer-title">{esc(it.get("title", "")[:90])}</span>'
+                       f'<span class="flyer-detail">{price} {esc(it.get("detail") or "")}</span></a>')
+    body = f'<div class="flyer-grid">{"".join(out)}</div>' if out else '<p class="empty">No flyer promos read yet today.</p>'
+    return panel("flyers", "📰", "This week's flyers", "本周传单", "Promotions from FairPrice, Sheng Siong, Giant and singpromos",
+                 body, steps, "panel-scroll")
 
 
 def page(data_dir: Path) -> str:
     st = Store(data_dir)
     try:
         cfg = st.config()
-        secs, chips, stock = [], [], []
+        today = datetime.now(cards.TZ).date()
+        bought = st.bought_on(today)
         last = st.db.execute("SELECT MAX(day) d FROM prices").fetchone()["d"]
-        for i, s in enumerate(cfg["staples"]):
+        staples = cfg["staples"]
+        order = [("top", "⭐", "Top 10 bought")] + [(f"s{i}", cards.EMOJI.get(s, "🛒"), s.title()) for i, s in enumerate(staples)] \
+            + [("flyers", "📰", "Flyers")]
+
+        def steps(k):
+            return nav_buttons((order[k - 1][0], order[k - 1][2]) if k > 0 else None,
+                               (order[k + 1][0], order[k + 1][2]) if k + 1 < len(order) else None)
+
+        top_html, has_top = top_panel(st, bought, steps(0))
+        panels, side = [top_html], []
+        for i, s in enumerate(staples):
             brands = cfg["brands"].get(s, [])
             d = staple_data(st, s, brands)
-            secs.append(section(i, s, d, brands))
-            chips.append(f'<a href="#s{i}">{cards.EMOJI.get(s, "🛒")} {esc(s.title())}</a>')
-            if d and d["stock"]:
-                stock.append(f'<a href="#s{i}">{cards.EMOJI.get(s, "🛒")} {esc(s.title())}</a>')
+            panels.append(staple_panel(i, s, d, brands, bought, steps(i + 1)))
+            side.append((f"s{i}", cards.EMOJI.get(s, "🛒"), s.title(), " 💰" if d and d["stock"] else ""))
+        panels.append(flyers_panel(data_dir / "flyers.json", steps(len(order) - 1)))
     finally:
         st.db.close()
+    nav = ('<a href="#top" class="side-top">⭐ Top 10 bought</a>'
+           + "".join(f'<a href="#{pid}">{em} {esc(t)}{badge}</a>' for pid, em, t, badge in side)
+           + '<a href="#flyers">📰 Flyers</a>')
     now = datetime.now(cards.TZ)
     checked = date.fromisoformat(last) if last else None
-    fresh = (f"Prices checked {checked.strftime('%A, %d %B')}" if checked else "No prices yet")
+    fresh = f"Prices checked {checked.strftime('%a %d %b')}" if checked else "No prices yet"
     if not checked or (now.date() - checked).days > 1:   # the 08:00 run missed a day: say so instead of looking current
-        fresh = f'<span class="stale">⚠ {fresh}. Today&#39;s check has not run yet, prices may be old.</span>'
-    stock_html = (f'<div class="stockbar"><span>💰 Cheapest in 8 weeks, good time to stock up:</span> {" ".join(stock)}</div>'
-                  if stock else "")
-    return TEMPLATE.format(date=fresh, chips="".join(chips), stock=stock_html,
-                           sections="".join(secs), flyers=flyers_html(data_dir / "flyers.json"),
+        fresh = f'<span class="stale">⚠ {fresh} · may be old</span>'
+    return TEMPLATE.format(fresh=fresh, nav=nav, panels="".join(panels), first="top" if has_top else "s0",
                            updated=esc(now.strftime("%d %b %Y, %H:%M")))
 
 
 class Handler(BaseHTTPRequestHandler):
     data_dir = Path("data")
 
+    def _send(self, code: int, body: bytes, ctype: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):   # noqa: N802
         if self.path.split("?")[0] not in ("/", "/index.html"):
             self.send_error(404)
             return
         try:
-            body, code = page(self.data_dir).encode(), 200
+            self._send(200, page(self.data_dir).encode(), "text/html; charset=utf-8")
         except Exception:   # noqa: BLE001
             log.exception("web page failed")
-            body, code = "<h1>Sorry, the price page is resting. Try again in a minute.</h1>".encode(), 500
-        self.send_response(code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+            self._send(500, "<h1>Sorry, the price page is resting. Try again in a minute.</h1>".encode(), "text/html; charset=utf-8")
+
+    def do_POST(self):   # noqa: N802
+        """POST /bought {"url": ...} -> toggles today's purchase. Same-origin only; the URL must be a product we have priced."""
+        if self.path != "/bought":
+            self.send_error(404)
+            return
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):   # another website posting from the parents' browser
+            self.send_error(403)
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= MAX_BODY:
+                raise ValueError("size")
+            url = json.loads(self.rfile.read(n)).get("url")
+            if not isinstance(url, str) or len(url) > 600:
+                raise ValueError("url")
+        except Exception:   # noqa: BLE001
+            self.send_error(400)
+            return
+        st = Store(self.data_dir)
+        try:
+            res = st.toggle_bought(url, datetime.now(cards.TZ).date())
+        finally:
+            st.db.close()
+        if res is None:
+            self.send_error(404)
+            return
+        self._send(200, json.dumps(res).encode(), "application/json")
 
     def log_message(self, fmt, *args):   # keep the container log quiet
         pass
@@ -219,130 +299,172 @@ TEMPLATE = """<!doctype html>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400..900,100&family=Atkinson+Hyperlegible:wght@400;700&family=Noto+Serif+SC:wght@600;900&display=swap" rel="stylesheet">
 <style>
-:root{{--paper:#f4ead6;--paper2:#ecdfc4;--ink:#1f1a14;--muted:#6b5d4a;--chili:#c2391b;--pandan:#2c6e3f;--turmeric:#e6a72a;--card:#fffaf0;
-  --display:'Fraunces',Georgia,serif;--body:'Atkinson Hyperlegible',system-ui,sans-serif;--zh:'Noto Serif SC',serif}}
+:root{{--paper:#f4ead6;--ink:#1f1a14;--muted:#6b5d4a;--chili:#c2391b;--pandan:#2c6e3f;--turmeric:#e6a72a;--card:#fffaf0;--line:#d8c7a4;
+  --display:'Fraunces',Georgia,serif;--body:'Atkinson Hyperlegible',system-ui,sans-serif;--zh:'Noto Serif SC',serif;--bar:74px}}
 *{{box-sizing:border-box}}
-html{{scroll-behavior:smooth;scroll-padding-top:9rem}}
-@media (max-width:820px){{html{{scroll-padding-top:1rem}}}}
-body{{margin:0;color:var(--ink);font:1.2rem/1.5 var(--body);background:var(--paper);
-  background-image:radial-gradient(circle at 15% 10%,#fbf3e2 0,transparent 45%),radial-gradient(circle at 90% 60%,#e9d9b8 0,transparent 40%);}}
-body::before{{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;opacity:.35;mix-blend-mode:multiply;
+body{{margin:0;color:var(--ink);font:1.05rem/1.4 var(--body);background:var(--paper);
+  background-image:radial-gradient(circle at 15% 10%,#fbf3e2 0,transparent 45%),radial-gradient(circle at 90% 60%,#e9d9b8 0,transparent 40%)}}
+body::before{{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;opacity:.3;mix-blend-mode:multiply;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .4 0 0 0 0 .3 0 0 0 0 .2 0 0 0 .25 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}}
 a{{color:inherit}}
-.wrap{{max-width:1180px;margin:0 auto;padding:0 1.25rem}}
-/* masthead: shophouse awning stripes + newspaper title */
-.awning{{position:relative;height:26px;background:repeating-linear-gradient(90deg,var(--chili) 0 56px,var(--card) 56px 112px)}}
-.awning::after{{content:"";position:absolute;left:0;right:0;top:26px;height:20px;filter:drop-shadow(0 5px 3px rgba(60,30,10,.2));
-  background:radial-gradient(circle at 28px 0,var(--chili) 27px,transparent 28px) 0 0/112px 20px repeat-x,radial-gradient(circle at 84px 0,var(--card) 27px,transparent 28px) 0 0/112px 20px repeat-x}}
-.mast{{text-align:center;padding:2.2rem 0 1.4rem;border-bottom:3px double var(--ink)}}
-.kicker{{font:700 .95rem/1 var(--body);letter-spacing:.32em;text-transform:uppercase;color:var(--chili)}}
-.mast h1{{font:900 clamp(3rem,10vw,7.2rem)/.9 var(--display);font-variation-settings:"SOFT" 100,"opsz" 144;margin:.6rem 0 .2rem;letter-spacing:-.02em}}
-.mast h1 em{{font-style:italic;color:var(--chili)}}
-.mast .zhbig{{font:900 clamp(1.6rem,4vw,2.4rem)/1 var(--zh);letter-spacing:.4em;color:var(--pandan)}}
-.mast .date{{margin-top:1rem;font-size:1.15rem;color:var(--muted)}}
-.stale{{display:inline-block;background:#f8d9d2;color:var(--chili);font-weight:700;padding:.4rem .9rem;border-radius:8px}}
-/* staple chips */
-.chips{{position:sticky;top:0;z-index:20;background:rgba(244,234,214,.92);backdrop-filter:blur(8px);border-bottom:1px solid #d8c7a4}}
-.chips .wrap{{display:flex;flex-wrap:wrap;justify-content:center;gap:.6rem;padding:.8rem 1.25rem}}
-.chips a{{flex:none;text-decoration:none;font-weight:700;padding:.55rem 1rem;min-height:48px;display:flex;align-items:center;border-radius:999px;
-  background:var(--card);border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink);transition:transform .15s,box-shadow .15s}}
-.chips a:hover,.chips a:focus-visible{{transform:translate(-2px,-2px);box-shadow:5px 5px 0 var(--ink)}}
-.stockbar{{margin:1.6rem 0 0;padding:1rem 1.2rem;border-radius:14px;background:var(--pandan);color:#fff;font-weight:700;display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}}
-.stockbar a{{background:#fff;color:var(--pandan);padding:.35rem .8rem;border-radius:999px;text-decoration:none}}
-/* staple sections */
-.staple{{padding:3rem 0 2.2rem;border-bottom:2px dashed #cdb98f;animation:rise .8s cubic-bezier(.2,.8,.2,1)}}  /* no fill, no delay: if animations never run the page is still fully visible */
-@keyframes rise{{from{{opacity:0;transform:translateY(24px)}}}}
-.sh{{display:flex;align-items:center;gap:1rem;margin-bottom:1.3rem}}
-.stamp{{width:78px;height:78px;flex:none;display:grid;place-items:center;font-size:2.6rem;border-radius:50%;background:var(--card);
-  border:3px solid var(--chili);box-shadow:inset 0 0 0 5px var(--card),inset 0 0 0 7px var(--chili);transform:rotate(-8deg)}}
-.sh h2{{margin:0;font:800 clamp(2.2rem,5.5vw,3.4rem)/1 var(--display);font-variation-settings:"SOFT" 100;letter-spacing:-.01em}}
-.zh{{font:900 .55em var(--zh);color:var(--chili);margin-left:.6rem;letter-spacing:.1em}}
-.shelf{{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:1.6rem;align-items:start}}
-@media (max-width:820px){{.nav.prev{{left:-8px}}.nav.next{{right:-8px}}.more .mini{{flex-basis:200px}}.mini-img{{width:72px;height:72px}}.chips{{position:static}}.chips a{{padding:.45rem .8rem;font-size:1rem}}.shelf{{grid-template-columns:1fr}}.tag{{transform:rotate(-.5deg);padding-left:2.9rem;margin-right:10px}}.mast h1{{font-size:clamp(2.6rem,12vw,4rem)}}}}
-/* the hero price tag */
-.tag{{position:relative;display:flex;flex-direction:column;gap:.35rem;text-decoration:none;padding:1.6rem 1.6rem 1.5rem 3.4rem;background:var(--card);
-  border:3px solid var(--ink);border-radius:10px 26px 26px 10px;box-shadow:8px 8px 0 var(--store);transform:rotate(-1.2deg);transform-origin:12% 50%;
-  transition:transform .35s cubic-bezier(.3,1.6,.5,1),box-shadow .2s}}
-.tag::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:1.9rem;background:var(--store);border-radius:7px 0 0 7px}}
-.hole{{position:absolute;left:.45rem;top:50%;width:1rem;height:1rem;margin-top:-.5rem;border-radius:50%;background:var(--paper);box-shadow:inset 1px 1px 2px rgba(0,0,0,.4)}}
-.tag:hover,.tag:focus-visible{{transform:rotate(.6deg) translateY(-3px);box-shadow:12px 12px 0 var(--store)}}
-.tag-img{{width:100%;height:220px;object-fit:contain;background:#fff;border-radius:12px;border:2px solid #eadfc8;padding:.6rem;margin-bottom:.4rem;
-  transition:transform .4s cubic-bezier(.3,1.6,.5,1)}}
-.tag-emoji{{display:grid;place-items:center;height:150px;font-size:5.5rem;background:radial-gradient(circle,#fff 0,#fbf3e2 70%)}}
-.tag:hover .tag-img{{transform:scale(1.04) rotate(-1deg)}}
-.tag-kicker{{font-weight:700;font-size:.9rem;letter-spacing:.18em;text-transform:uppercase;color:var(--pandan)}}
-.tag-name{{font-size:1.35rem;font-weight:700;line-height:1.3}}
-.tag-price{{font:900 clamp(3.4rem,9vw,5.4rem)/1 var(--display);font-variation-settings:"SOFT" 100,"opsz" 144;color:var(--chili);letter-spacing:-.03em;margin-top:.3rem}}
-.tag-unit{{font-size:1.15rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}}
-.tag-deal{{align-self:flex-start;background:var(--turmeric);color:var(--ink);font-weight:700;padding:.3rem .8rem;border-radius:6px;transform:rotate(-1.5deg)}}
-.btn{{margin-top:.9rem;align-self:stretch;text-align:center;font-weight:700;font-size:1.25rem;padding:1rem;border-radius:12px;background:var(--ink);color:var(--paper);min-height:56px}}
-.tag:hover .btn{{background:var(--store)}}
-.chg{{font-size:.95rem;font-weight:700;padding:.15rem .6rem;border-radius:999px}}
+a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-offset:2px}}
+/* top bar: awning strip, title, date, legend */
+.awning{{height:12px;background:repeating-linear-gradient(90deg,var(--chili) 0 40px,var(--card) 40px 80px)}}
+.bar{{height:calc(var(--bar) - 12px);display:flex;align-items:center;gap:1.4rem;padding:0 1.2rem;border-bottom:3px double var(--ink)}}
+.bar h1{{margin:0;font:900 2rem/1 var(--display);font-variation-settings:"SOFT" 100,"opsz" 144;letter-spacing:-.02em;white-space:nowrap}}
+.bar h1 em{{color:var(--chili)}} .bar h1 .zh{{font-size:.7em}}
+.fresh{{color:var(--muted);white-space:nowrap}}
+.legend{{margin-left:auto;display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;font-size:.95rem}}
+.legend b{{font-weight:700;color:var(--muted);margin-right:.2rem}}
+.stale{{background:#f8d9d2;color:var(--chili);font-weight:700;padding:.25rem .7rem;border-radius:8px}}
+.chg{{font-size:.9rem;font-weight:700;padding:.12rem .55rem;border-radius:999px;white-space:nowrap}}
 .chg.down{{background:#d9f0dc;color:var(--pandan)}} .chg.up{{background:#f8d9d2;color:var(--chili)}}
 .chg.same{{background:#ece3d0;color:var(--muted)}} .chg.new{{background:var(--turmeric);color:var(--ink)}}
-/* smaller cards */
-.minis{{display:grid;gap:1rem}}
-.mini{{display:flex;gap:1rem;align-items:center;text-decoration:none;background:var(--card);padding:1rem 1.1rem;border-radius:14px;border:2px solid #d8c7a4;border-left:8px solid var(--store);
-  transition:transform .2s,border-color .2s,box-shadow .2s}}
-.mini:hover,.mini:focus-visible{{transform:translateX(4px);border-color:var(--store);box-shadow:0 8px 20px -10px rgba(60,30,10,.4)}}
-.mini-img{{width:96px;height:96px;flex:none;object-fit:contain;background:#fff;border-radius:10px;border:1px solid #eadfc8;padding:.3rem}}
-.mini-emoji{{display:grid;place-items:center;font-size:2.4rem;background:radial-gradient(circle,#fff 0,#fbf3e2 75%)}}
-.more .mini-emoji{{font-size:4rem}}
-.mini-body{{display:grid;gap:.25rem;flex:1;min-width:0}}
-.mini-top{{display:flex;justify-content:space-between;gap:.5rem;align-items:center}}
-.pill{{background:var(--store);color:#fff;font-weight:700;font-size:.85rem;padding:.2rem .65rem;border-radius:999px;justify-self:start}}
-.more-h{{font:700 1rem var(--body);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:2rem 0 .8rem}}
-.carousel{{position:relative}}
-.more{{display:flex;gap:1rem;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;padding:.4rem .3rem 1rem;scrollbar-width:thin}}
-.more .mini{{flex:0 0 230px;scroll-snap-align:start;flex-direction:column;align-items:stretch;gap:.6rem}}
-.nav{{position:absolute;top:38%;z-index:2;width:56px;height:56px;border-radius:50%;border:3px solid var(--ink);background:var(--card);color:var(--ink);
-  font:900 2.2rem/1 var(--display);box-shadow:3px 3px 0 var(--ink);cursor:pointer;transition:opacity .2s,transform .15s}}
-.nav:hover{{transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--ink)}}
-.nav.prev{{left:-20px}} .nav.next{{right:-20px}}
-.nav[disabled]{{opacity:0;pointer-events:none}}
-.more .mini-img{{width:100%;height:150px}}
-.more .mini-top{{flex-wrap:wrap}}
-.mini-label{{font-size:.85rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}}
-.mini-name{{font-weight:700}}
-.mini-price b{{font:800 1.8rem var(--display);color:var(--ink)}} .mini-price small{{color:var(--muted);font-size:1rem}}
-.mini-deal{{color:var(--chili);font-weight:700}}
-.mini-go{{justify-self:end;font-weight:700;color:var(--store)}}
-.stock{{display:inline-block;background:#d9f0dc;color:var(--pandan);padding:.5rem 1rem;border-radius:10px;margin:0 0 1rem}}
-.meta,.empty{{color:var(--muted);font-size:1rem;margin:1.1rem 0 0}}
-/* flyers */
-.band{{font:900 clamp(2rem,5vw,3rem)/1 var(--display);margin:3.5rem 0 1.4rem;padding:.9rem 1.2rem;background:var(--ink);color:var(--paper);border-radius:10px;transform:rotate(-.6deg)}}
-.flyer-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem}}
-.flyer{{display:grid;gap:.5rem;align-content:start;text-decoration:none;background:var(--card);padding:1rem;border-radius:12px;border:2px solid var(--ink);box-shadow:4px 4px 0 var(--store);transition:transform .2s}}
-.flyer:hover,.flyer:focus-visible{{transform:translate(-2px,-2px) rotate(-.6deg)}}
-.flyer-title{{font-weight:700}} .flyer-detail{{color:var(--muted);font-size:1rem}} .flyer-detail b{{font:800 1.4rem var(--display);color:var(--chili)}}
-footer{{text-align:center;color:var(--muted);font-size:1rem;padding:3rem 1rem 4rem}}
-footer .legend{{display:flex;flex-wrap:wrap;justify-content:center;gap:.8rem;margin-bottom:1rem}}
-a:focus-visible{{outline:4px solid var(--turmeric);outline-offset:3px}}
-@media (prefers-reduced-motion:reduce){{*{{animation:none!important;transition:none!important}}.more{{scroll-behavior:auto}}}}
+.chg.star{{background:var(--card);border:1px solid var(--line)}}
+/* app: category list + one panel */
+.app{{display:grid;grid-template-columns:220px 1fr}}
+.side{{display:flex;flex-direction:column;gap:.3rem;padding:.8rem .6rem;border-right:2px solid var(--line);overflow-y:auto}}
+.side a{{text-decoration:none;font-weight:700;padding:.45rem .8rem;border-radius:12px;border:2px solid transparent;white-space:nowrap}}
+.side a:hover{{background:var(--card);border-color:var(--line)}}
+.side a[aria-current]{{background:var(--ink);color:var(--paper)}}
+.side .side-top{{border-color:var(--turmeric);margin-bottom:.3rem}}
+.panel{{padding:.9rem 1.3rem 1rem;display:flex;flex-direction:column;gap:.8rem;min-width:0}}
+.js .panel[hidden]{{display:none}}
+.panel{{animation:rise .45s cubic-bezier(.2,.8,.2,1)}}
+@keyframes rise{{from{{opacity:0;transform:translateY(10px)}}}}
+.ph{{display:flex;align-items:center;gap:.9rem}}
+.stamp{{width:56px;height:56px;flex:none;display:grid;place-items:center;font-size:1.9rem;border-radius:50%;background:var(--card);
+  border:3px solid var(--chili);box-shadow:inset 0 0 0 4px var(--card),inset 0 0 0 6px var(--chili);transform:rotate(-8deg)}}
+.ph-t{{min-width:0}}
+.ph h2{{margin:0;font:800 2.2rem/1 var(--display);font-variation-settings:"SOFT" 100}}
+.zh{{font:900 .6em var(--zh);color:var(--chili);margin-left:.5rem;letter-spacing:.08em}}
+.ph-sub{{color:var(--muted);font-size:.95rem;margin-top:.25rem}}
+.stock{{background:#d9f0dc;color:var(--pandan);font-weight:700;padding:.1rem .6rem;border-radius:8px;margin-left:.4rem}}
+.steps{{margin-left:auto;display:flex;gap:.6rem}}
+.step{{text-decoration:none;font-weight:700;font-size:1.05rem;padding:.6rem 1.1rem;min-height:48px;display:flex;align-items:center;border-radius:999px;
+  background:var(--card);border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink);white-space:nowrap;transition:transform .15s,box-shadow .15s}}
+.step:hover{{transform:translate(-2px,-2px);box-shadow:5px 5px 0 var(--ink)}}
+/* shelf: price tag + 3x3 grid */
+.shelf{{display:grid;grid-template-columns:330px 1fr;gap:1.2rem;flex:1;min-height:0}}
+.tag{{position:relative;display:flex;flex-direction:column;gap:.5rem;padding:1rem 1rem 1rem 2.6rem;background:var(--card);
+  border:3px solid var(--ink);border-radius:10px 22px 22px 10px;box-shadow:7px 7px 0 var(--store);transform:rotate(-.8deg);min-height:0}}
+.tag::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:1.5rem;background:var(--store);border-radius:7px 0 0 7px}}
+.hole{{position:absolute;left:.3rem;top:50%;width:.9rem;height:.9rem;margin-top:-.45rem;border-radius:50%;background:var(--paper);box-shadow:inset 1px 1px 2px rgba(0,0,0,.4)}}
+.tag-link{{display:flex;flex-direction:column;gap:.3rem;text-decoration:none;flex:1;min-height:0;overflow:hidden}}
+.tag-link>*{{flex:none}}
+.tag-img{{width:100%;height:clamp(90px,18vh,170px);object-fit:contain;background:#fff;border-radius:10px;border:2px solid #eadfc8;padding:.4rem;flex:none}}
+.emoji{{display:grid;place-items:center;background:radial-gradient(circle,#fff 0,#fbf3e2 75%);font-size:3.2rem}}
+.tag-img.emoji{{font-size:4.5rem}}
+.cell-img.emoji{{font-size:2.3rem;overflow:hidden}}
+.tag-kicker{{font-weight:700;font-size:.8rem;letter-spacing:.16em;text-transform:uppercase;color:var(--pandan)}}
+.tag-name{{font-size:1.15rem;font-weight:700;line-height:1.25;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
+.tag-price{{font:900 clamp(2.6rem,7vh,3.8rem)/1 var(--display);font-variation-settings:"SOFT" 100,"opsz" 144;color:var(--chili);letter-spacing:-.03em}}
+.tag-unit{{color:var(--muted);display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}}
+.tag-deal{{align-self:flex-start;background:var(--turmeric);font-weight:700;padding:.2rem .7rem;border-radius:6px;transform:rotate(-1.5deg)}}
+.btn{{margin-top:auto;text-align:center;font-weight:700;font-size:1.15rem;padding:.7rem;border-radius:12px;background:var(--ink);color:var(--paper)}}
+.tag-link:hover .btn{{background:var(--store)}}
+.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:minmax(0,1fr);gap:.7rem;min-height:0}}
+.cell{{display:flex;flex-direction:column;background:var(--card);border-radius:14px;border:2px solid var(--line);border-left:7px solid var(--store);
+  padding:.55rem .7rem;min-height:0;overflow:hidden;transition:border-color .2s,box-shadow .2s}}
+.cell:hover .cell-name{{text-decoration:underline}}
+.cell:hover{{border-color:var(--store);box-shadow:0 8px 18px -10px rgba(60,30,10,.45)}}
+.cell-link{{display:flex;flex-direction:column;gap:.25rem;text-decoration:none;flex:1;min-height:0;overflow:hidden}}
+.cell-link>*{{flex:none}}   /* never squash the name to zero height: the card clips at the bottom instead */
+.cell-head{{display:flex;gap:.6rem;align-items:center}}
+.cell-img{{width:64px;height:64px;flex:none;object-fit:contain;background:#fff;border-radius:10px;border:1px solid #eadfc8;padding:.2rem}}
+.cell-hp{{display:flex;flex-direction:column;gap:.15rem;min-width:0}}
+.cell-top{{display:flex;gap:.4rem;align-items:center;overflow:hidden;white-space:nowrap}}
+.pill{{background:var(--store);color:#fff;font-weight:700;font-size:.75rem;padding:.1rem .55rem;border-radius:999px;white-space:nowrap}}
+.cell-label{{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}}
+.cell-price{{font:800 1.5rem/1 var(--display)}}
+.cell-name{{font-weight:700;font-size:.98rem;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
+.cell-meta{{color:var(--muted);font-size:.88rem;min-width:0;flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
+.cell-meta b{{color:var(--chili)}}
+@media (max-height:800px){{.cell-meta{{-webkit-line-clamp:1}}.cell-img{{width:50px;height:50px}}.cell-img.emoji{{font-size:1.8rem}}.cell-label{{display:none}}.cell-price{{font-size:1.3rem}}
+  .cell{{padding:.4rem .6rem}}.cell-link{{gap:.1rem}}.cell-actions{{padding-top:.1rem}}.cell-name{{font-size:.95rem;line-height:1.2}}
+  .buy{{min-height:32px;padding:.25rem .6rem;font-size:.85rem}}.panel{{gap:.6rem;padding-top:.6rem}}
+  .ph h2{{font-size:1.9rem}}.stamp{{width:48px;height:48px;font-size:1.6rem}}}}
+.cell-actions{{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-top:auto;padding-top:.3rem}}
+.buy{{flex:none;font:700 .9rem var(--body);padding:.4rem .75rem;min-height:38px;border-radius:999px;border:2px solid var(--pandan);background:#fff;color:var(--pandan);cursor:pointer;white-space:nowrap}}
+.buy:hover{{background:#eaf5ec}}
+.buy.on{{background:var(--pandan);color:#fff}}
+.tag .buy{{font-size:1.05rem;min-height:46px;margin-top:.2rem;width:100%}}
+.buy.pop{{animation:pop .35s}}
+@keyframes pop{{50%{{transform:scale(1.08)}}}}
+/* top 10 + flyers */
+.grid-top{{grid-template-columns:repeat(auto-fill,minmax(260px,1fr));grid-auto-rows:auto}}
+.empty-top{{display:flex;gap:1.4rem;align-items:center;max-width:720px;background:var(--card);border:2px dashed var(--turmeric);border-radius:18px;padding:1.4rem 1.6rem;font-size:1.2rem}}
+.empty-top .big{{font-size:4rem}}
+.flyer-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.8rem}}
+.flyer{{display:grid;gap:.4rem;align-content:start;text-decoration:none;background:var(--card);padding:.8rem;border-radius:12px;border:2px solid var(--ink);box-shadow:4px 4px 0 var(--store)}}
+.flyer:hover{{transform:translate(-2px,-2px)}}
+.flyer .pill{{justify-self:start}}
+.flyer-title{{font-weight:700}} .flyer-detail{{color:var(--muted);font-size:.95rem}} .flyer-detail b{{font:800 1.3rem var(--display);color:var(--chili)}}
+.empty{{color:var(--muted)}}
+footer{{color:var(--muted);font-size:.85rem;padding:.3rem 1.3rem .6rem;text-align:right}}
+/* one screen per category on a laptop/desktop; normal scrolling on phones and very short windows */
+@media (min-width:900px) and (min-height:600px){{
+  .js body{{height:100vh;overflow:hidden;display:flex;flex-direction:column}}
+  .js .app{{flex:1;min-height:0}}
+  .js .side{{max-height:calc(100vh - var(--bar) - 28px)}}
+  .js main{{min-height:0;display:flex;flex-direction:column}}
+  .js .panel{{flex:1;min-height:0}}
+  .js .panel-scroll{{overflow-y:auto}}
+  .js .grid:not(.grid-top){{grid-template-rows:repeat(3,minmax(0,1fr))}}
+}}
+@media (max-width:1400px){{.app{{grid-template-columns:185px 1fr}}.side a{{padding:.4rem .6rem;font-size:.98rem}}.shelf{{grid-template-columns:265px 1fr}}}}
+@media (max-width:1100px){{.legend{{display:none}}.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media (max-width:899px){{
+  .bar{{height:auto;flex-wrap:wrap;padding:.6rem 1rem;gap:.4rem 1rem}} .legend{{display:flex;margin-left:0}}
+  .app{{grid-template-columns:1fr}} .side{{flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:2px solid var(--line)}}
+  .side a{{background:var(--card);border-color:var(--line)}}
+  .shelf{{grid-template-columns:1fr}} .grid{{grid-template-columns:1fr}} .ph{{flex-wrap:wrap}} .steps{{margin-left:0}}
+}}
+@media (prefers-reduced-motion:reduce){{*{{animation:none!important;transition:none!important}}}}
 </style></head>
 <body>
 <div class="awning" aria-hidden="true"></div>
-<header class="mast wrap">
-  <div class="kicker">Supermarket Hunter · for the family kitchen</div>
-  <h1>Today's <em>Best</em> Buys</h1>
-  <div class="zhbig">今日好价</div>
-  <div class="date">{date}</div>
+<header class="bar">
+  <h1>Today's <em>Best</em> Buys <span class="zh">今日好价</span></h1>
+  <span class="fresh">{fresh}</span>
+  <div class="legend" aria-label="What the marks mean"><b>Key:</b><span class="chg down">▼ cheaper</span><span class="chg up">▲ dearer</span>
+    <span class="chg new">NEW</span><span class="chg star">★ trusted brand</span></div>
 </header>
-<nav class="chips" aria-label="Jump to an item"><div class="wrap">{chips}<a href="#flyers">📰 Flyers</a></div></nav>
-<main class="wrap">{stock}{sections}{flyers}</main>
-<footer class="wrap">
-  <div class="legend"><span class="chg down">▼ cheaper</span><span class="chg up">▲ dearer</span><span class="chg new">NEW</span><span>★ trusted brand</span></div>
-  Tap any card to open the product in the shop's website. Online prices; the shelf price can differ by a few cents.<br>
-  Page opened {updated} · new prices every morning at 08:00
-</footer>
+<div class="app">
+  <nav class="side" aria-label="Categories">{nav}</nav>
+  <main>{panels}</main>
+</div>
+<footer>Online prices; the shelf price can differ by a few cents · page opened {updated} · new prices every morning at 08:00</footer>
 <script>
-/* More choices carousel: arrows scroll ~one screen of cards; each arrow hides at its end */
-document.querySelectorAll('.carousel').forEach(function(c){{
-  var m=c.querySelector('.more'),p=c.querySelector('.prev'),n=c.querySelector('.next');
-  function upd(){{p.disabled=m.scrollLeft<8;n.disabled=m.scrollLeft+m.clientWidth>=m.scrollWidth-8;}}
-  p.onclick=function(){{m.scrollBy({{left:-m.clientWidth*.9}});}};
-  n.onclick=function(){{m.scrollBy({{left:m.clientWidth*.9}});}};
-  m.addEventListener('scroll',upd,{{passive:true}});window.addEventListener('resize',upd);upd();
+/* one category per screen: the URL hash picks the panel (#s0, #top, #flyers); arrow keys step through them */
+document.documentElement.classList.add('js');
+var panels=[].slice.call(document.querySelectorAll('.panel')), links=[].slice.call(document.querySelectorAll('.side a'));
+function show(){{
+  var id=location.hash.slice(1); if(!document.getElementById(id)||!panels.some(function(p){{return p.id===id}})) id='{first}';
+  panels.forEach(function(p){{p.hidden=p.id!==id}});
+  links.forEach(function(a){{a.getAttribute('href')==='#'+id?a.setAttribute('aria-current','page'):a.removeAttribute('aria-current')}});
+  window.scrollTo(0,0);
+}}
+window.addEventListener('hashchange',show); show();
+document.addEventListener('keydown',function(e){{
+  if(e.key!=='ArrowLeft'&&e.key!=='ArrowRight'||e.target.closest('input,textarea'))return;
+  var cur=panels.filter(function(p){{return !p.hidden}})[0], s=cur&&cur.querySelectorAll('.step');
+  var a=[].slice.call(s||[]).filter(function(x){{return e.key==='ArrowLeft'?x.textContent.trim().charAt(0)==='‹':x.textContent.trim().slice(-1)==='›'}})[0];
+  if(a)location.hash=a.getAttribute('href');
+}});
+/* I bought this: tap = bought today, tap again = undo */
+document.addEventListener('click',function(e){{
+  var b=e.target.closest('.buy'); if(!b)return;
+  b.disabled=true;
+  fetch('/bought',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:b.dataset.url}})}})
+    .then(function(r){{if(!r.ok)throw r;return r.json()}})
+    .then(function(j){{
+      document.querySelectorAll('.buy').forEach(function(x){{if(x.dataset.url===b.dataset.url){{
+        x.classList.toggle('on',j.bought); x.setAttribute('aria-pressed',j.bought);
+        x.textContent=j.bought?'✓ Bought today':'🧺 I bought it'; x.classList.remove('pop'); void x.offsetWidth; x.classList.add('pop');}}}});
+    }})
+    .catch(function(){{b.textContent='Try again';}})
+    .finally(function(){{b.disabled=false;}});
 }});
 </script>
 </body></html>"""

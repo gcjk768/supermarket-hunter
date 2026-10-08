@@ -41,10 +41,16 @@ One Docker container on a home NAS runs `python -m smh serve`, which starts four
    run failed).
 7. Every card is a link to the product on the shop's own website. Photos load straight from the shop's image server.
 
-What the page shows per staple: the best-value pack as a big price tag (★ = a brand the family trusts), the best pack
-at each other store, one current offer, the price change since the last check, and a 💰 stock-up flag. Large type
-(Atkinson Hyperlegible, designed for low-vision readers), Chinese names for each staple, 48px+ tap targets, and it
-works on a phone.
+**What the page looks like:** one category per screen, no scrolling on a laptop. A category list on the left; the
+chosen category shows its best-value pack as a big price tag (★ = a brand the family trusts) and the next nine products
+in a 3×3 grid, cheapest per 100g first, each with its photo, price, per-100g price and any offer. Big ‹ previous /
+next › buttons (or the arrow keys) step through the categories. The key (▼ cheaper, ▲ dearer, NEW, ★ trusted brand)
+sits in the header. Large type (Atkinson Hyperlegible, designed for low-vision readers) and Chinese names for each staple.
+
+**⭐ Top 10 bought:** no supermarket publishes how often an item is bought, so the family counts their own. Every
+product has a **🧺 I bought it** button (`POST /bought`); a second tap the same day undoes it. The Top 10 tab ranks
+what the family buys most, with today's price for each. The server only records products it already has a price for,
+caps the request size and refuses requests from other websites.
 
 ## Telegram commands (in the bot's own topic, or a private chat for allowed users)
 | Command | What |
