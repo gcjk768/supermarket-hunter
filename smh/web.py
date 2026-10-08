@@ -1,6 +1,7 @@
-"""Family web page: one category per screen (best value + 9 more), a Top 10 of what the family bought, flyers.
-Rendered live from data/prices.db (+ data/flyers.json from the last flyer run) on every request. Stdlib only.
-The only write is POST /bought (the "I bought this" button), which accepts a product URL we already have a price for.
+"""Family web page: today's promotions, one category per screen (best value + 9 more), one screen per supermarket, flyers.
+Rendered live from data/prices.db (+ data/flyers.json from the last flyer run) on every request. Read-only, stdlib only.
+Supermarket logos are downloaded once from each store's own website into data/logos/ and served from /logo/<store>
+(FairPrice's site forbids embedding its files elsewhere, and a local copy keeps working if a store moves its files).
 Env: WEB_PORT (default 8000 inside the container; 0 = off)."""
 from __future__ import annotations
 
@@ -8,12 +9,13 @@ import html
 import json
 import logging
 import threading
+import urllib.request
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import cards, scrape
+from . import cards, festive, scrape, vault
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -21,11 +23,37 @@ ZH = {"rice": "米", "cooking oil": "食用油", "eggs": "鸡蛋", "chicken": "�
       "choy sum": "菜心", "tofu": "豆腐", "soy sauce": "酱油", "noodles": "面", "onion": "洋葱", "tomato": "番茄", "milk": "牛奶",
       "garlic": "蒜", "bread": "面包", "potato": "马铃薯", "cabbage": "包菜", "carrot": "红萝卜", "beef": "牛肉", "salmon": "三文鱼",
       "kailan": "芥兰"}
-STORE_COLOR = {"FairPrice": "#1d4fa3", "Cold Storage": "#b3261e", "Sheng Siong": "#d9731a", "Giant": "#2f7d3b", "Prime": "#6b3fa0"}
+STORE_COLOR = {"FairPrice": "#1d4fa3", "Cold Storage": "#b3261e", "Sheng Siong": "#1f4e9a", "Giant": "#5aa832", "Prime": "#0b7a3b",
+               "Hao Mart": "#e06d22", "RedMart": "#e5394b", "Amazon Fresh": "#f08804"}
+# store -> (online shop, official logo found on the store's own website, 2026-10-08)
+STORE_INFO = {
+    "FairPrice": ("https://www.fairprice.com.sg/", "https://www.fairprice.com.sg/static/icons/icon-192x192.png"),
+    "Cold Storage": ("https://coldstorage.com.sg/",
+                     "https://editor-upload-cdn.optimonk.com/userImages/219654/65b0c36e18b80a0024a815bf/CS-newlogo_1791364795977.png"),
+    "Sheng Siong": ("https://shengsiong.com.sg/", "https://s3-ap-southeast-1.amazonaws.com/shengsiongcontent/wp-content/uploads/"
+                    "2020/06/01112211/SS_logo_eng_plain-e1590981996889.jpg"),
+    "Giant": ("https://giant.sg/", "https://giant.sg/media/BNVQZ9EWW73E66HQMR0N5TYF1G.png"),
+    "Prime": ("https://www.primesupermarket.com/", "https://www.primesupermarket.com/wp-content/uploads/2026/08/cropped-favicon-192x192.png"),
+    "Hao Mart": ("https://www.haomart.com.sg/", "https://www.haomart.com.sg/w-ebase-uploads/2021/06/hao_logo.svg"),
+    "RedMart": ("https://redmart.lazada.sg/", "https://img.lazcdn.com/g/icms/images/ims-web/930f1232-e64c-47c2-88df-8e66ea34b294.png"),
+    "Amazon Fresh": ("https://www.amazon.sg/fresh", "https://www.amazon.sg/favicon.ico"),
+}
+WORDMARK = {"Cold Storage", "Sheng Siong", "Hao Mart"}   # wide logos that already spell the name: shown alone in the list
+WHY_NO_PRICES = {   # stores whose shelf prices the page cannot show, and why (see docs/vault/Scraping Playbook.md)
+    "Sheng Siong": "its online shop sits behind an anti-bot check, which we never get around",
+    "Giant": "its online shop moved to the foodpanda app",
+    "Prime": "it publishes no online prices",
+    "Hao Mart": "it publishes no online prices",
+    "RedMart": "its pages do not show prices we can read",
+    "Amazon Fresh": "its pages do not show prices we can read",
+}
+LOGO_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/svg+xml": "svg", "image/webp": "webp", "image/x-icon": "ico",
+              "image/vnd.microsoft.icon": "ico"}
+EXT_TYPES = {v: k for k, v in LOGO_TYPES.items()}
 PER_STAPLE = 10   # products shown per staple: the best-value tag + a 3x3 grid, so one category fits one screen
 HOSTS = {"fairprice.com.sg": "FairPrice", "coldstorage.com.sg": "Cold Storage", "shengsiong.com.sg": "Sheng Siong",
-         "giant.sg": "Giant"}
-MAX_BODY = 4096
+         "giant.sg": "Giant", "primesupermarket.com": "Prime", "haomart.com.sg": "Hao Mart", "redmart.lazada.sg": "RedMart",
+         "amazon.sg": "Amazon Fresh"}
 
 
 def esc(x) -> str:
@@ -35,6 +63,45 @@ def esc(x) -> str:
 def safe_url(u: str) -> str:
     """Only http(s) links reach an href (rows come from scraped pages)."""
     return u if urlparse(u or "").scheme in ("http", "https") else "#"
+
+
+def slug(store: str) -> str:
+    return "".join(ch for ch in store.lower() if ch.isalnum())
+
+
+def logo_file(data_dir: Path, store: str) -> Path | None:
+    return next((data_dir / "logos" / f"{slug(store)}.{e}" for e in EXT_TYPES if (data_dir / "logos" / f"{slug(store)}.{e}").exists()), None)
+
+
+def ensure_logos(data_dir: Path) -> None:
+    """Download each store's logo once (best effort; a missing logo falls back to the store's colour square)."""
+    (data_dir / "logos").mkdir(parents=True, exist_ok=True)
+    for store, (_, url) in STORE_INFO.items():
+        if logo_file(data_dir, store):
+            continue
+        try:
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (supermarket-hunter; family page)"}),
+                                            timeout=30) as r:
+                    ctype = r.headers.get_content_type()
+                    body = r.read(500_001)
+            except Exception as ex:   # noqa: BLE001  e.g. a server missing part of its certificate chain: let the NAS browser try
+                log.info("logo for %s: %s, trying the NAS browser", store, ex)
+                body, ctype = scrape.browser_file(url)
+            if ctype not in LOGO_TYPES or len(body) > 500_000:
+                raise ValueError(f"{ctype}, {len(body)} bytes")
+            (data_dir / "logos" / f"{slug(store)}.{LOGO_TYPES[ctype]}").write_bytes(body)
+            log.info("logo saved: %s", store)
+            vault.log_event("🖼", "logo saved", f"{store} · from {url}", store)
+        except Exception as ex:   # noqa: BLE001
+            log.warning("logo for %s not saved: %s", store, ex)
+            vault.log_event("⚠️", "logo not saved", f"{store} · {ex}", store)
+
+
+def logo_img(data_dir: Path, store: str, cls: str) -> str:
+    if logo_file(data_dir, store):
+        return f'<img class="{cls}" src="/logo/{slug(store)}" alt="{esc(store)} logo">'
+    return f'<span class="{cls} logo-none" style="--store:{STORE_COLOR.get(store, "#555")}" aria-hidden="true">{esc(store[:1])}</span>'
 
 
 def store_of(url: str) -> str:
@@ -47,8 +114,14 @@ def staple_data(st: Store, staple: str, brands: list[str]) -> dict | None:
     day = st.db.execute("SELECT MAX(day) d FROM prices WHERE query=?", (staple,)).fetchone()["d"]
     if not day:
         return None
-    rows = [dict(r, store=store_of(r["url"])) for r in st.db.execute(
-        "SELECT * FROM prices WHERE query=? AND day=? ORDER BY unit_price IS NULL, unit_price", (staple, day))]
+    # each store's own latest run (today or yesterday): the 3-hourly refresh reads Cold Storage only, so after midnight
+    # FairPrice's rows are still yesterday's until the 08:00 run, and must not vanish from the page
+    recent = [dict(r, store=store_of(r["url"])) for r in st.db.execute(
+        "SELECT * FROM prices WHERE query=? AND day>=date(?, '-1 day') ORDER BY unit_price IS NULL, unit_price", (staple, day))]
+    latest = {}
+    for r in recent:
+        latest[r["store"]] = max(latest.get(r["store"], ""), r["day"])
+    rows = [r for r in recent if r["day"] == latest[r["store"]]]
     rows = [r for r in rows if scrape.relevant(r["name"], staple)]   # rows saved before the relevance filter existed
     if not rows:
         return None
@@ -61,7 +134,7 @@ def staple_data(st: Store, staple: str, brands: list[str]) -> dict | None:
     more = [r for r in rows if r not in shown and cards.near(r, winner)][:max(0, PER_STAPLE - len(shown))]
     d = date.fromisoformat(day)
     low = st.low(winner["url"], d)
-    return dict(day=day, winner=winner, others=[b for b in bests if b is not winner], deal=deal, more=more, count=len(rows),
+    return dict(day=day, winner=winner, others=[b for b in bests if b is not winner], deal=deal, more=more, count=len(rows), rows=rows,
                 prev=st.previous(staple, d).get(winner["url"]),
                 stock=low is not None and winner["unit_price"] is not None and winner["unit_price"] <= low - 0.005, low=low)
 
@@ -88,16 +161,8 @@ def photo(r: dict, cls: str, em: str) -> str:
     return f'<span class="{cls} emoji" aria-hidden="true">{em}</span>'
 
 
-def buy_button(url: str, bought: set[str]) -> str:
-    if safe_url(url) == "#":
-        return ""
-    on = url in bought
-    return (f'<button class="buy{" on" if on else ""}" type="button" data-url="{esc(url)}" aria-pressed="{str(on).lower()}">'
-            f'{"✓ Bought today" if on else "🧺 I bought it"}</button>')
-
-
-def cell(r: dict, label: str, brands: list[str], em: str, bought: set[str]) -> str:
-    """One product in the 3x3 grid. Row 1: photo, store, price, Open ›. Row 2: name. Row 3: per-100g + deal, I-bought-it."""
+def cell(r: dict, label: str, brands: list[str], em: str) -> str:
+    """One product card. Row 1: photo, store, price. Row 2: name. Row 3: per-100g + deal, Open ›."""
     dl = deal_text(r)
     url = esc(safe_url(r["url"]))
     return (f'<div class="cell" style="--store:{STORE_COLOR.get(r["store"], "#555")}">'
@@ -106,10 +171,10 @@ def cell(r: dict, label: str, brands: list[str], em: str, bought: set[str]) -> s
             f'<span class="cell-price">{cards.money(r["price"])}</span></span></span>'
             f'<span class="cell-name">{"★ " if cards.is_brand(r, brands) else ""}{esc(r["name"])}</span></a>'
             f'<span class="cell-actions"><span class="cell-meta">{esc(cards.unit(r))}' + (f' · <b>{esc(dl)}</b>' if dl else "") + '</span>'
-            + buy_button(r["url"], bought) + '</span></div>')
+            + f'<a class="open" href="{url}" target="_blank" rel="noopener">Open ›</a></span></div>')
 
 
-def tag_html(w: dict, d: dict, brands: list[str], em: str, bought: set[str], kicker: str = "Best value") -> str:
+def tag_html(w: dict, d: dict, brands: list[str], em: str, kicker: str = "Best value") -> str:
     dl = deal_text(w)
     url = esc(safe_url(w["url"]))
     return (f'<div class="tag" style="--store:{STORE_COLOR.get(w["store"], "#555")}">'
@@ -120,8 +185,7 @@ def tag_html(w: dict, d: dict, brands: list[str], em: str, bought: set[str], kic
             f'<span class="tag-price">{cards.money(w["price"])}</span>'
             f'<span class="tag-unit">{esc(cards.unit(w))} {change(w.get("unit_price"), d.get("prev"))}</span>'
             + (f'<span class="tag-deal">🏷 {esc(dl)}</span>' if dl else "")
-            + f'<span class="btn">Open at {esc(w["store"])} <span aria-hidden="true">→</span></span></a>'
-            + buy_button(w["url"], bought) + '</div>')
+            + f'<span class="btn">Open at {esc(w["store"])} <span aria-hidden="true">→</span></span></a></div>')
 
 
 def nav_buttons(prev: tuple[str, str] | None, nxt: tuple[str, str] | None) -> str:
@@ -130,57 +194,99 @@ def nav_buttons(prev: tuple[str, str] | None, nxt: tuple[str, str] | None) -> st
     return out + (f'<a class="step" href="#{nxt[0]}">{esc(nxt[1])} ›</a>' if nxt else '<span></span>')
 
 
-def panel(pid: str, em: str, title: str, zh: str, sub: str, body: str, steps: str, extra_cls: str = "") -> str:
+def panel(pid: str, em: str, title: str, zh: str, sub: str, body: str, steps: str, extra_cls: str = "", logo: str = "") -> str:
     return (f'<section class="panel {extra_cls}" id="{pid}" aria-label="{esc(title)}"><header class="ph">'
-            f'<span class="stamp" aria-hidden="true">{em}</span><div class="ph-t"><h2>{esc(title)}<span class="zh">{esc(zh)}</span></h2>'
+            + (logo or f'<span class="stamp" aria-hidden="true">{em}</span>') + '<div class="ph-t">'
+            f'<h2>{esc(title)}<span class="zh">{esc(zh)}</span></h2>'
             f'<div class="ph-sub">{sub}</div></div><nav class="steps">{steps}</nav></header>{body}</section>')
 
 
-def staple_panel(i: int, staple: str, d: dict | None, brands: list[str], bought: set[str], steps: str) -> str:
-    em, zh = cards.EMOJI.get(staple, "🛒"), ZH.get(staple, "")
+def staple_panel(pid: str, staple: str, d: dict | None, brands: list[str], steps: str, em: str = "", festive: str = "") -> str:
+    """One category screen; `festive` (e.g. "🪔 For Deepavali, Sun 08 Nov") heads the subtitle of a seasonal item."""
+    em, zh = em or cards.EMOJI.get(staple, "🛒"), ZH.get(staple, "")
+    head = f'<b>{esc(festive)}</b> · ' if festive else ""
     if not d:
-        return panel(f"s{i}", em, staple.title(), zh, "", '<p class="empty">No prices today. We\'ll try again tomorrow morning.</p>', steps)
+        return panel(pid, em, staple.title(), zh, head + "No prices yet. Seasonal items are searched at the next refresh.",
+                     '<p class="empty">No prices today. We\'ll try again at the next refresh.</p>', steps)
     w = d["winner"]
     items = [(o, "best here") for o in d["others"]] + ([(d["deal"], "on offer")] if d["deal"] else [])
     items += [(r, f"#{n}") for n, r in enumerate(d["more"], len(items) + 2)]
-    grid = "".join(cell(r, label, brands, em, bought) for r, label in items)
-    sub = f'Compared {d["count"]} products · cheapest per 100g / 100ml / piece first'
+    grid = "".join(cell(r, label, brands, em) for r, label in items)
+    sub = head + f'Compared {d["count"]} products · cheapest per 100g / 100ml / piece first'
     if d["stock"]:
         sub += f' <span class="stock">💰 Stock up: cheapest in 8 weeks (was {cards.money(d["low"])}{esc(w["unit"])})</span>'
-    return panel(f"s{i}", em, staple.title(), zh, sub, f'<div class="shelf">{tag_html(w, d, brands, em, bought)}<div class="grid">{grid}</div></div>', steps)
+    return panel(pid, em, staple.title(), zh, sub, f'<div class="shelf">{tag_html(w, d, brands, em)}<div class="grid">{grid}</div></div>', steps)
 
 
-def top_panel(st: Store, bought: set[str], steps: str) -> tuple[str, bool]:
-    top = st.top_bought(10)
-    items = []
-    for t in top:
-        row = st.latest_row(t["url"])
-        if row:
-            r = dict(row, store=store_of(row["url"]))
-            items.append(cell(r, f"bought {t['times']}×", [], cards.EMOJI.get(t["staple"], "🛒"), bought))
-    if not items:
-        body = ('<div class="empty-top"><span class="big">🧺</span><p><b>Nothing here yet.</b><br>When you buy something, open its '
-                'category and tap <b>🧺 I bought it</b>. The ten things the family buys most will show here, with today\'s price.</p></div>')
-    else:
-        body = f'<div class="grid grid-top">{"".join(items)}</div>'
-    sub = "What the family buys most, from the 🧺 I bought it button · today's price for each"
-    return panel("top", "⭐", "Top 10 bought", "最常买", sub, body, steps, "panel-scroll"), bool(items)
+def promo_panel(staples: list[str], datas: dict, cfg: dict, new_urls: set[str], steps: str) -> str:
+    """Every current promotion on the staples that is in the same ballpark as the best value (no egg white under eggs),
+    new ones (first seen today) first, then the biggest saving."""
+    seen, items = set(), []
+    for s_ in staples:
+        d = datas.get(s_)
+        for r in (d["rows"] if d else []):
+            if (r["promo"] or r["was"]) and r["url"] not in seen and cards.near(r, d["winner"]):
+                seen.add(r["url"])
+                saving = (r["was"] - r["price"]) / r["was"] if r["was"] else 0
+                items.append((r["url"] not in new_urls, -saving, s_, r))
+    items.sort(key=lambda t: t[:2])
+    cells = [cell(r, f"🆕 {s_}" if r["url"] in new_urls else s_, cfg["brands"].get(s_, []), cards.EMOJI.get(s_, "🛒"))
+             for _, _, s_, r in items]
+    n_new = sum(1 for t in items if not t[0])
+    sub = (f"{len(items)} promotions on your staples at FairPrice and Cold Storage" + (f" · 🆕 {n_new} new today" if n_new else "")
+           + " · biggest saving first · flyer deals from the other stores are on each supermarket's page")
+    many = len(cells) > 15   # more than one screen: normal-height cards, the panel scrolls
+    body = (f'<div class="shelf shelf-store"><div class="grid grid-store{" grid-auto" if many else ""}">{"".join(cells)}</div></div>' if cells
+            else '<p class="empty">No promotions on your staples right now. New ones show here within a few hours.</p>')
+    return panel("promo", "🏷", "Promotions", "促销", sub, body, steps, "panel-scroll" if many else "")
 
 
-def flyers_panel(path: Path, steps: str) -> str:
+def load_flyers(path: Path) -> dict:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8")).get("sections", {})
     except Exception:   # noqa: BLE001  no flyer run yet, or a half-written file
-        data = {}
-    out = []
-    for src, items in data.get("sections", {}).items():
-        for it in [i for i in items if i.get("staple")][:8] or items[:4]:
-            r = it.get("row") or {}
-            price = f'<b>{cards.money(r["price"])}</b>' if r.get("price") is not None else ""
-            out.append(f'<a class="flyer" href="{esc(safe_url(it.get("url", "")))}" target="_blank" rel="noopener" '
-                       f'style="--store:{STORE_COLOR.get(it.get("store"), "#555")}"><span class="pill">{esc(it.get("store", src))}</span>'
-                       f'<span class="flyer-title">{esc(it.get("title", "")[:90])}</span>'
-                       f'<span class="flyer-detail">{price} {esc(it.get("detail") or "")}</span></a>')
+        return {}
+
+
+def flyer_card(it: dict, src: str = "") -> str:
+    r = it.get("row") or {}
+    price = f'<b>{cards.money(r["price"])}</b>' if r.get("price") is not None else ""
+    return (f'<a class="flyer" href="{esc(safe_url(it.get("url", "")))}" target="_blank" rel="noopener" '
+            f'style="--store:{STORE_COLOR.get(it.get("store"), "#555")}"><span class="pill">{esc(it.get("store", src))}</span>'
+            f'<span class="flyer-title">{esc(it.get("title", "")[:90])}</span>'
+            f'<span class="flyer-detail">{price} {esc(it.get("detail") or "")}</span></a>')
+
+
+def store_panel(pid: str, store: str, staples: list[str], datas: dict, cfg: dict, flyer_items: list[dict],
+                steps: str, data_dir: Path) -> str:
+    """One supermarket's top items: its best-value pack for every staple (🏆 = cheapest of all the stores),
+    or, for stores whose site we cannot read prices from, the items in its flyer."""
+    cells = []
+    for s in staples:
+        d = datas.get(s)
+        mine = [r for r in (d["rows"] if d else []) if r["store"] == store]
+        if mine:
+            b = cards.best_of(mine, cfg["brands"].get(s, []))
+            label = f"🏆 {s}" if b is d["winner"] else s   # the subtitle explains 🏆
+            cells.append(cell(b, label, cfg["brands"].get(s, []), cards.EMOJI.get(s, "🛒")))
+    note = f" ({cards.STORE_NOTE[store]})" if store in cards.STORE_NOTE else ""
+    if cells:
+        sub = f"Best value at {esc(store)}{esc(note)} for each staple · 🏆 = cheapest of all the stores"
+        body = f'<div class="shelf shelf-store"><div class="grid grid-store">{"".join(cells)}</div></div>'
+        extra = ""
+    else:
+        why = WHY_NO_PRICES.get(store, "no prices were read today")
+        shop = STORE_INFO.get(store, ("#", ""))[0]
+        sub = f"No shelf prices here: {esc(why)}." + (" Below: deals from its flyer and promotion pages." if flyer_items else "")
+        body = (f'<div class="flyer-grid">{"".join(flyer_card(it) for it in flyer_items[:24])}</div>' if flyer_items
+                else '<p class="empty">No flyer deals read for this store this week.</p>')
+        body += f'<p><a class="shop" href="{esc(safe_url(shop))}" target="_blank" rel="noopener">Visit {esc(store)} online →</a></p>'
+        extra = "panel-scroll"
+    return panel(pid, "", store, "", sub, body, steps, extra, logo=logo_img(data_dir, store, "ph-logo"))
+
+
+def flyers_panel(sections: dict, steps: str) -> str:
+    out = [flyer_card(it, src) for src, items in sections.items() for it in ([i for i in items if i.get("staple")][:8] or items[:4])]
     body = f'<div class="flyer-grid">{"".join(out)}</div>' if out else '<p class="empty">No flyer promos read yet today.</p>'
     return panel("flyers", "📰", "This week's flyers", "本周传单", "Promotions from FairPrice, Sheng Siong, Giant and singpromos",
                  body, steps, "panel-scroll")
@@ -191,40 +297,64 @@ def page(data_dir: Path) -> str:
     try:
         cfg = st.config()
         today = datetime.now(cards.TZ).date()
-        bought = st.bought_on(today)
+        new_urls = st.new_promo_urls(today)
         last = st.db.execute("SELECT MAX(day) d FROM prices").fetchone()["d"]
         staples = cfg["staples"]
-        order = [("top", "⭐", "Top 10 bought")] + [(f"s{i}", cards.EMOJI.get(s, "🛒"), s.title()) for i, s in enumerate(staples)] \
-            + [("flyers", "📰", "Flyers")]
+        fests = festive.active(today)   # seasonal categories, on about six weeks before each festival
+        fitems = [(f, t) for f in fests for t in f["items"] if t not in staples]
+        datas = {s: staple_data(st, s, cfg["brands"].get(s, [])) for s in staples + [t for _, t in fitems]}
+        sections = load_flyers(data_dir / "flyers.json")
+        flyer_by_store = {}
+        for items in sections.values():
+            for it in items:
+                flyer_by_store.setdefault(it.get("store") or "", []).append(it)
+        present = {r["store"] for d in datas.values() if d for r in d["rows"]} | {k for k in flyer_by_store if k}
+        stores = sorted(set(cards.STORE_ORDER) | present, key=lambda x: (cards.STORE_ORDER.index(x) if x in cards.STORE_ORDER else 99, x))
+        store_ids = {x: "st-" + slug(x) for x in stores}
+        order = [("promo", "🏷", "Promotions")] + [(f"f{k}", f["emoji"], t.title()) for k, (f, t) in enumerate(fitems)] \
+            + [(f"s{i}", cards.EMOJI.get(s, "🛒"), s.title()) for i, s in enumerate(staples)] \
+            + [(store_ids[x], cards.STORE_EMOJI.get(x, "🏬"), x) for x in stores] + [("flyers", "📰", "Flyers")]
 
         def steps(k):
             return nav_buttons((order[k - 1][0], order[k - 1][2]) if k > 0 else None,
                                (order[k + 1][0], order[k + 1][2]) if k + 1 < len(order) else None)
 
-        top_html, has_top = top_panel(st, bought, steps(0))
-        panels, side = [top_html], []
+        panels, side, fside = [promo_panel(staples + [t for _, t in fitems], datas, cfg, new_urls, steps(0))], [], {}
+        for k, (f, t) in enumerate(fitems):
+            label = f'{f["emoji"]} For {f["name"]}, {f["day"]:%a %d %b}'
+            panels.append(staple_panel(f"f{k}", t, datas[t], cfg["brands"].get(t, []), steps(k + 1), em=f["emoji"], festive=label))
+            fside.setdefault((f["name"], f["emoji"], f["day"]), []).append((f"f{k}", t))
         for i, s in enumerate(staples):
-            brands = cfg["brands"].get(s, [])
-            d = staple_data(st, s, brands)
-            panels.append(staple_panel(i, s, d, brands, bought, steps(i + 1)))
+            d = datas[s]
+            panels.append(staple_panel(f"s{i}", s, d, cfg["brands"].get(s, []), steps(len(fitems) + i + 1)))
             side.append((f"s{i}", cards.EMOJI.get(s, "🛒"), s.title(), " 💰" if d and d["stock"] else ""))
-        panels.append(flyers_panel(data_dir / "flyers.json", steps(len(order) - 1)))
+        for k, x in enumerate(stores, len(fitems) + len(staples) + 1):
+            panels.append(store_panel(store_ids[x], x, staples, datas, cfg, flyer_by_store.get(x, []), steps(k), data_dir))
+        panels.append(flyers_panel(sections, steps(len(order) - 1)))
     finally:
         st.db.close()
-    nav = ('<a href="#top" class="side-top">⭐ Top 10 bought</a>'
+    nav = ('<a href="#promo" class="side-top">🏷 Promotions</a>'
+           + "".join(f'<span class="side-h side-fest">{em} {esc(name)} · {day:%d %b}</span>'
+                     + "".join(f'<a href="#{pid}">{esc(t.title())}</a>' for pid, t in items) for (name, em, day), items in fside.items())
+           + ('<span class="side-h">Every day</span>' if fside else "")
            + "".join(f'<a href="#{pid}">{em} {esc(t)}{badge}</a>' for pid, em, t, badge in side)
-           + '<a href="#flyers">📰 Flyers</a>')
+           + '<span class="side-h">By supermarket</span>'
+           + "".join(f'<a href="#{store_ids[x]}" class="side-store" title="{esc(x)}">'
+                     + (logo_img(data_dir, x, "side-word") if x in WORDMARK and logo_file(data_dir, x)
+                        else f'{logo_img(data_dir, x, "side-logo")} {esc(x)}') + '</a>' for x in stores)
+           + '<span class="side-h">More</span><a href="#flyers">📰 Flyers</a>')
     now = datetime.now(cards.TZ)
     checked = date.fromisoformat(last) if last else None
     fresh = f"Prices checked {checked.strftime('%a %d %b')}" if checked else "No prices yet"
     if not checked or (now.date() - checked).days > 1:   # the 08:00 run missed a day: say so instead of looking current
         fresh = f'<span class="stale">⚠ {fresh} · may be old</span>'
-    return TEMPLATE.format(fresh=fresh, nav=nav, panels="".join(panels), first="top" if has_top else "s0",
+    return TEMPLATE.format(fresh=fresh, nav=nav, panels="".join(panels), first="promo",
                            updated=esc(now.strftime("%d %b %Y, %H:%M")))
 
 
 class Handler(BaseHTTPRequestHandler):
     data_dir = Path("data")
+    seen: dict[str, float] = {}   # visitor ip -> last logged visit (vault gets one line per device per 30 min)
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
@@ -235,43 +365,35 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):   # noqa: N802
-        if self.path.split("?")[0] not in ("/", "/index.html"):
+        path = self.path.split("?")[0]
+        if path.startswith("/logo/"):
+            store = next((x for x in STORE_INFO if slug(x) == path[6:]), None)   # only known names: no path tricks
+            f = logo_file(self.data_dir, store) if store else None
+            if not f:
+                self.send_error(404)
+                return
+            body = f.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", EXT_TYPES[f.suffix[1:]])
+            self.send_header("Cache-Control", "max-age=86400")
+            self.send_header("Content-Security-Policy", "script-src 'none'")   # an SVG logo can never run code here
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path not in ("/", "/index.html"):
             self.send_error(404)
             return
+        ip, now = self.client_address[0], datetime.now().timestamp()
+        if now - Handler.seen.get(ip, 0) > 1800:
+            Handler.seen[ip] = now
+            vault.log_event("👀", "page opened", f"from {ip}")
         try:
             self._send(200, page(self.data_dir).encode(), "text/html; charset=utf-8")
         except Exception:   # noqa: BLE001
             log.exception("web page failed")
             self._send(500, "<h1>Sorry, the price page is resting. Try again in a minute.</h1>".encode(), "text/html; charset=utf-8")
-
-    def do_POST(self):   # noqa: N802
-        """POST /bought {"url": ...} -> toggles today's purchase. Same-origin only; the URL must be a product we have priced."""
-        if self.path != "/bought":
-            self.send_error(404)
-            return
-        origin = self.headers.get("Origin")
-        if origin and urlparse(origin).netloc != self.headers.get("Host"):   # another website posting from the parents' browser
-            self.send_error(403)
-            return
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-            if not 0 < n <= MAX_BODY:
-                raise ValueError("size")
-            url = json.loads(self.rfile.read(n)).get("url")
-            if not isinstance(url, str) or len(url) > 600:
-                raise ValueError("url")
-        except Exception:   # noqa: BLE001
-            self.send_error(400)
-            return
-        st = Store(self.data_dir)
-        try:
-            res = st.toggle_bought(url, datetime.now(cards.TZ).date())
-        finally:
-            st.db.close()
-        if res is None:
-            self.send_error(404)
-            return
-        self._send(200, json.dumps(res).encode(), "application/json")
 
     def log_message(self, fmt, *args):   # keep the container log quiet
         pass
@@ -279,6 +401,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def start(data_dir: Path, port: int) -> ThreadingHTTPServer:
     Handler.data_dir = data_dir
+    threading.Thread(target=ensure_logos, args=(data_dir,), daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     log.info("web page on :%d", port)
@@ -328,6 +451,17 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .side a:hover{{background:var(--card);border-color:var(--line)}}
 .side a[aria-current]{{background:var(--ink);color:var(--paper)}}
 .side .side-top{{border-color:var(--turmeric);margin-bottom:.3rem}}
+.side-fest{{color:var(--chili);font-size:.8rem}}
+.side-h{{font-size:.75rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:.7rem .8rem .1rem}}
+.shelf.shelf-store{{grid-template-columns:1fr}}   /* more specific than the width rules for .shelf/.grid below */
+.grid.grid-store{{grid-template-columns:repeat(5,minmax(0,1fr))}}
+.grid.grid-auto{{grid-auto-rows:auto}}
+.js .shelf:has(.grid-auto){{flex:none}}
+.grid-store .pill{{display:none}}   /* every card is the same store: the staple label matters instead */
+.grid-store .cell-label{{font-weight:700;color:var(--ink);font-size:.8rem}}
+@media (max-height:900px){{.side{{gap:.12rem}}.side a{{padding:.28rem .7rem}}.side-h{{margin:.45rem .8rem 0}}}}
+@media (max-width:1100px){{.grid.grid-store{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}
+@media (max-width:899px){{.grid.grid-store{{grid-template-columns:1fr}}}}
 .panel{{padding:.9rem 1.3rem 1rem;display:flex;flex-direction:column;gap:.8rem;min-width:0}}
 .js .panel[hidden]{{display:none}}
 .panel{{animation:rise .45s cubic-bezier(.2,.8,.2,1)}}
@@ -380,21 +514,18 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .cell-name{{font-weight:700;font-size:.98rem;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
 .cell-meta{{color:var(--muted);font-size:.88rem;min-width:0;flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
 .cell-meta b{{color:var(--chili)}}
+.open{{font-weight:700;color:var(--store);text-decoration:none;white-space:nowrap;padding:.2rem .1rem}}
+.ph-logo{{height:56px;max-width:220px;object-fit:contain;background:#fff;border-radius:12px;padding:.35rem .6rem;border:2px solid var(--line);flex:none}}
+.side-word{{height:24px;max-width:150px;object-fit:contain;object-position:left;vertical-align:middle}}
+.side-logo{{width:26px;height:26px;object-fit:contain;background:#fff;border-radius:6px;vertical-align:middle;margin-right:.15rem}}
+.logo-none{{display:inline-grid;place-items:center;background:var(--store);color:#fff;font-weight:700}}
+.ph-logo.logo-none{{width:56px;font-size:1.8rem}}
+.shop{{display:inline-block;margin-top:.6rem;font-weight:700;text-decoration:none;padding:.6rem 1.1rem;border-radius:999px;background:var(--ink);color:var(--paper)}}
 @media (max-height:800px){{.cell-meta{{-webkit-line-clamp:1}}.cell-img{{width:50px;height:50px}}.cell-img.emoji{{font-size:1.8rem}}.cell-label{{display:none}}.cell-price{{font-size:1.3rem}}
   .cell{{padding:.4rem .6rem}}.cell-link{{gap:.1rem}}.cell-actions{{padding-top:.1rem}}.cell-name{{font-size:.95rem;line-height:1.2}}
-  .buy{{min-height:32px;padding:.25rem .6rem;font-size:.85rem}}.panel{{gap:.6rem;padding-top:.6rem}}
-  .ph h2{{font-size:1.9rem}}.stamp{{width:48px;height:48px;font-size:1.6rem}}}}
+    .ph h2{{font-size:1.9rem}}.stamp{{width:48px;height:48px;font-size:1.6rem}}}}
 .cell-actions{{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-top:auto;padding-top:.3rem}}
-.buy{{flex:none;font:700 .9rem var(--body);padding:.4rem .75rem;min-height:38px;border-radius:999px;border:2px solid var(--pandan);background:#fff;color:var(--pandan);cursor:pointer;white-space:nowrap}}
-.buy:hover{{background:#eaf5ec}}
-.buy.on{{background:var(--pandan);color:#fff}}
-.tag .buy{{font-size:1.05rem;min-height:46px;margin-top:.2rem;width:100%}}
-.buy.pop{{animation:pop .35s}}
-@keyframes pop{{50%{{transform:scale(1.08)}}}}
-/* top 10 + flyers */
-.grid-top{{grid-template-columns:repeat(auto-fill,minmax(260px,1fr));grid-auto-rows:auto}}
-.empty-top{{display:flex;gap:1.4rem;align-items:center;max-width:720px;background:var(--card);border:2px dashed var(--turmeric);border-radius:18px;padding:1.4rem 1.6rem;font-size:1.2rem}}
-.empty-top .big{{font-size:4rem}}
+.tag /* top 10 + flyers */
 .flyer-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.8rem}}
 .flyer{{display:grid;gap:.4rem;align-content:start;text-decoration:none;background:var(--card);padding:.8rem;border-radius:12px;border:2px solid var(--ink);box-shadow:4px 4px 0 var(--store)}}
 .flyer:hover{{transform:translate(-2px,-2px)}}
@@ -410,7 +541,7 @@ footer{{color:var(--muted);font-size:.85rem;padding:.3rem 1.3rem .6rem;text-alig
   .js main{{min-height:0;display:flex;flex-direction:column}}
   .js .panel{{flex:1;min-height:0}}
   .js .panel-scroll{{overflow-y:auto}}
-  .js .grid:not(.grid-top){{grid-template-rows:repeat(3,minmax(0,1fr))}}
+  .js .grid:not(.grid-auto){{grid-template-rows:repeat(3,minmax(0,1fr))}}
 }}
 @media (max-width:1400px){{.app{{grid-template-columns:185px 1fr}}.side a{{padding:.4rem .6rem;font-size:.98rem}}.shelf{{grid-template-columns:265px 1fr}}}}
 @media (max-width:1100px){{.legend{{display:none}}.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
@@ -442,7 +573,7 @@ var panels=[].slice.call(document.querySelectorAll('.panel')), links=[].slice.ca
 function show(){{
   var id=location.hash.slice(1); if(!document.getElementById(id)||!panels.some(function(p){{return p.id===id}})) id='{first}';
   panels.forEach(function(p){{p.hidden=p.id!==id}});
-  links.forEach(function(a){{a.getAttribute('href')==='#'+id?a.setAttribute('aria-current','page'):a.removeAttribute('aria-current')}});
+  links.forEach(function(a){{if(a.getAttribute('href')==='#'+id){{a.setAttribute('aria-current','page');a.scrollIntoView({{block:'nearest'}});}}else a.removeAttribute('aria-current')}});
   window.scrollTo(0,0);
 }}
 window.addEventListener('hashchange',show); show();
@@ -451,20 +582,6 @@ document.addEventListener('keydown',function(e){{
   var cur=panels.filter(function(p){{return !p.hidden}})[0], s=cur&&cur.querySelectorAll('.step');
   var a=[].slice.call(s||[]).filter(function(x){{return e.key==='ArrowLeft'?x.textContent.trim().charAt(0)==='‹':x.textContent.trim().slice(-1)==='›'}})[0];
   if(a)location.hash=a.getAttribute('href');
-}});
-/* I bought this: tap = bought today, tap again = undo */
-document.addEventListener('click',function(e){{
-  var b=e.target.closest('.buy'); if(!b)return;
-  b.disabled=true;
-  fetch('/bought',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:b.dataset.url}})}})
-    .then(function(r){{if(!r.ok)throw r;return r.json()}})
-    .then(function(j){{
-      document.querySelectorAll('.buy').forEach(function(x){{if(x.dataset.url===b.dataset.url){{
-        x.classList.toggle('on',j.bought); x.setAttribute('aria-pressed',j.bought);
-        x.textContent=j.bought?'✓ Bought today':'🧺 I bought it'; x.classList.remove('pop'); void x.offsetWidth; x.classList.add('pop');}}}});
-    }})
-    .catch(function(){{b.textContent='Try again';}})
-    .finally(function(){{b.disabled=false;}});
 }});
 </script>
 </body></html>"""

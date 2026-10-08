@@ -1,4 +1,4 @@
-"""The smallest checks that fail if the logic breaks: unit price maths, markdown parsing, card limits, access rule."""
+"""The smallest checks that fail if the logic breaks: unit price maths, parsing (Jina and browser), refresh, the web page."""
 from datetime import date, datetime
 
 from smh import cards, scrape, serve
@@ -32,19 +32,33 @@ def test_parse():
     cs = rows[3]
     assert cs["store"] == "Cold Storage" and cs["price"] == 3.70 and cs["was"] == 3.90 and cs["promo"] == "5% off"
     assert rows[4]["promo"] == "" and rows[4]["was"] is None
-    assert "Cold Storage</a>" in cards.item(cs) and "FairPrice</a>" in cards.item(rows[0])
 
 
 def test_search_merges_stores(monkeypatch):
-    monkeypatch.setattr(scrape, "fetch", lambda url, line, sleep: MD)
+    monkeypatch.setattr(scrape, "fetch", lambda url, line, sleep, route: MD)
     monkeypatch.setattr(scrape, "relevant", lambda name, q: True)   # merging only; relevance has its own test
-    two = {"FairPrice": ("https://example.test/fp?q={}", scrape.FP_LINE), "Cold Storage": ("https://example.test/cs?q={}", scrape.CS_LINE)}
+    two = {"FairPrice": ("https://example.test/fp?q={}", scrape.FP_LINE, "browser"),
+           "Cold Storage": ("https://example.test/cs?q={}", scrape.CS_LINE, "jina")}
     rows = scrape.search("eggs", stores=two, sleep=lambda s: None)
     assert {r["store"] for r in rows} == {"FairPrice", "Cold Storage"} and len(rows) == 5   # each parser keeps its own store's lines
     assert [r["unit_price"] is None for r in rows] == sorted(r["unit_price"] is None for r in rows)   # sized first
+    quick = scrape.search("eggs", stores=two, sleep=lambda s: None, full=False)
+    assert {r["store"] for r in quick} == {"Cold Storage"}   # FairPrice (browser) only in the daily full refresh
 
 
-def test_cards_and_store(tmp_path):
+def test_browser_lines():
+    """What the NAS browser sees on each store -> the same Markdown the Jina parsers read."""
+    fp = scrape._md_line("https://www.fairprice.com.sg/product/x",
+                         "Save $1.46\n$10.49\n$11.95\nWoodland Egg White\n500 ML\n•Halal\n2.8\n(4)\n\nAdd to cart", "https://m/i.jpg")
+    r = scrape.parse_fairprice(fp)[0]
+    assert (r["price"], r["was"], r["promo"], r["image"], r["unit"]) == (10.49, 11.95, "Save $1.46", "https://m/i.jpg", "/100ml")
+    cs = (scrape._md_line("https://coldstorage.com.sg/product/y", "", "https://c/i.jpg") + "\n"
+          + scrape._md_line("https://coldstorage.com.sg/product/y", "5% OFF\n$3.70\n$3.90\n\nFarm Choice Eggs 12s 660g", ""))
+    r = scrape.parse_coldstorage(cs)[0]
+    assert (r["price"], r["was"], r["promo"], r["image"]) == (3.70, 3.90, "5% off", "https://c/i.jpg")
+
+
+def test_store_history(tmp_path):
     st = Store(tmp_path)
     rows = scrape.parse(MD)
     st.save(date(2026, 10, 1), "rice", [dict(r, unit_price=r["unit_price"] + 0.02) for r in rows])   # last week dearer
@@ -52,22 +66,19 @@ def test_cards_and_store(tmp_path):
     prev = st.previous("rice", date(2026, 10, 8))
     assert round(prev[rows[0]["url"]], 3) == round(rows[0]["unit_price"] + 0.02, 3)
     assert st.low(rows[0]["url"], date(2026, 10, 8)) > rows[0]["unit_price"]
-    texts = cards.weekly_cards({"rice": dict(rows=rows, brands=["FairPrice"], prev=prev,
-                                             lows={rows[0]["url"]: st.low(rows[0]["url"], date(2026, 10, 8))})})
-    assert all(len(t) <= 4096 for t in texts) and "🟢" in texts[0] and "STOCK UP" in texts[-1]
-    assert texts[0].count("<b>FairPrice</b>") == 1 and texts[0].count("<b>Cold Storage</b>") == 1 and "🏆" in texts[0]   # one best per store
-    assert "&amp;" in cards.ask_cards("a & b", rows, [])[0]   # escaped
-    assert cards.marker(1.0, None) == "🆕 " and cards.marker(1.0, 1.0) == "⚪ " and cards.marker(1.1, 1.0).startswith("🔴")
+    assert cards.best_of(rows, ["Jasmine"])["url"].endswith("rice-2") and cards.best_of(rows, [])["url"] == rows[0]["url"]
 
 
-def test_promo_alert_once(monkeypatch, tmp_path):
+def test_refresh_marks_new_promos(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(scrape, "search", lambda q: scrape.parse(MD))
+    monkeypatch.setattr(scrape, "search", lambda q, full=True: [r for r in scrape.parse(MD) if "Rice" in r["name"]])
     app = serve.App()
-    first = app.promos(new_only=True, sleep=lambda s: None)
-    assert first and "🆕" in first[0] and "Save $0.30" in first[0]
-    assert app.promos(new_only=True, sleep=lambda s: None) == []            # same promo: not announced twice
-    assert "Save $0.30" in app.promos(new_only=False, sleep=lambda s: None)[0]   # /promos still lists it
+    app.store.save_config({"staples": ["rice"], "brands": {}})
+    assert app.refresh(full=False, sleep=lambda s: None)["rice"] == 2   # (+ any festive items in season)
+    today = datetime.now(serve.vault.TZ).date()
+    assert app.store.new_promo_urls(today) == {"https://www.fairprice.com.sg/product/rice-1"}   # 🆕 today
+    app.refresh(full=False, sleep=lambda s: None)
+    assert app.store.promo_seen("https://www.fairprice.com.sg/product/rice-1", "Save $0.30", today)   # still first seen today
 
 
 FP_PROMO = ("[Save $2.75 ![Image 6: Seara](https://x/a.jpg) $8.95$11.70 ![Image 7: campaign label](https://x/b.jpg)"
@@ -92,9 +103,6 @@ def test_flyer_sources(monkeypatch, tmp_path):
     sp = flyers.singpromos(["ice cream", "rice"], sleep=lambda s: None)
     assert len(sp) == 1 and sp[0]["store"] == "FairPrice" and sp[0]["staple"] == "ice cream"   # McDonald's out; same url once
     assert flyers._match("FairPrice Prices You'll Love", ["rice"]) == "" and flyers._match("Thai Rice 5kg", ["rice"]) == "rice"
-    texts = cards.flyer_cards({"FairPrice": [dict(source="FairPrice promotions", store="FairPrice", title=rows[0]["name"], url=rows[0]["url"],
-                                                  row=rows[0], detail="", staple="chicken", key="k1")], "Giant": []}, {"k1"})
-    assert "🆕" in texts[0] and "nothing readable" in texts[0] and all(len(t) <= 4096 for t in texts)
 
 
 def test_claude_parse():
@@ -107,16 +115,7 @@ def test_claude_parse():
         assert "limit" in str(ex)
 
 
-def test_allowed_and_schedule(monkeypatch, tmp_path):
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100123")
-    monkeypatch.setenv("TELEGRAM_THREAD_ID", "77")
-    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "5")
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    app, TOPIC = serve.App(), 77   # fake ids
-    assert app.allowed({"chat": {"id": -100123, "type": "supergroup"}, "message_thread_id": TOPIC})
-    assert not app.allowed({"chat": {"id": -100123, "type": "supergroup"}, "message_thread_id": TOPIC + 1})
-    assert app.allowed({"chat": {"id": 5, "type": "private"}, "from": {"id": 5}})
-    assert not app.allowed({"chat": {"id": 6, "type": "private"}, "from": {"id": 6}})
+def test_schedule():
     assert serve.next_run("mon 08:00", datetime(2026, 10, 8, 9, 0)) == datetime(2026, 10, 12, 8, 0)   # Thu -> next Mon
     assert serve.next_run("thu 10:00", datetime(2026, 10, 8, 9, 0)) == datetime(2026, 10, 8, 10, 0)   # later today
     assert serve.next_run("daily 08:00", datetime(2026, 10, 8, 9, 0)) == datetime(2026, 10, 9, 8, 0)   # tomorrow
@@ -135,6 +134,9 @@ def test_web_page(tmp_path):
     assert "Farm Choice" in page and "Open at Cold Storage" in page   # winner card links to its store
     assert '<script>"' not in page and "&lt;script&gt;" in page and "javascript:" not in page        # scraped text escaped, only http(s) hrefs
     assert "No prices today" in page                                   # tofu has no rows
+    assert 'id="st-coldstorage"' in page and "🏆 eggs" in page                # per-supermarket screen
+    assert all(f'id="st-{web.slug(x)}"' in page for x in cards.STORE_ORDER)     # every supermarket listed, data or not
+    assert "anti-bot check" in page and 'id="promo"' in page and "5% off" in page.split('id="promo"')[1].split("</section>")[0]
     eggs = page.split('id="s0"')[1].split('id="s1"')[0]
     assert 1 < eggs.count('class="cell"') + 1 <= web.PER_STAPLE                    # winner + more cards, capped
     assert "Prices checked Thu 08 Oct" in page            # the data date, not today
@@ -155,16 +157,23 @@ def test_relevant():
     assert scrape.relevant("Kampong Chicken Eggs 10s", "eggs")                     # names both: kept
 
 
-def test_bought_and_top10(tmp_path):
+def test_each_store_keeps_its_latest_run(tmp_path):
     from smh import web
     st = Store(tmp_path)
     rows = scrape.parse(MD)
-    st.save(date(2026, 10, 8), "eggs", rows)
-    u = rows[0]["url"]
-    assert st.toggle_bought(u, date(2026, 10, 8)) == {"bought": True, "times": 1}
-    assert st.toggle_bought(u, date(2026, 10, 8)) == {"bought": False, "times": 0}     # second tap same day = undo
-    st.toggle_bought(u, date(2026, 10, 7)); st.toggle_bought(u, date(2026, 10, 8)); st.toggle_bought(rows[1]["url"], date(2026, 10, 8))
-    assert [t["times"] for t in st.top_bought()] == [2, 1]
-    assert st.toggle_bought("https://evil.test/x", date(2026, 10, 8)) is None             # only products we have priced
-    st.db.close()
-    assert "bought 2×" in web.page(tmp_path)
+    fp = [r for r in rows if r["store"] == "FairPrice" and "Rice" in r["name"]]
+    cs = [dict(r, name="Cold Storage Jasmine Rice 5kg", url="https://coldstorage.com.sg/product/rice-9") for r in rows[:1]]
+    st.save(date(2026, 10, 8), "rice", fp + cs)          # 08:00 full run: both stores
+    st.save(date(2026, 10, 9), "rice", cs)               # 02:57 quick run next day: Cold Storage only
+    d = web.staple_data(st, "rice", [])
+    assert {r["store"] for r in d["rows"]} == {"FairPrice", "Cold Storage"}   # FairPrice did not vanish
+    assert all(r["day"] == "2026-10-09" for r in d["rows"] if r["store"] == "Cold Storage")
+
+
+def test_festive_windows():
+    from smh import festive
+    assert [f["name"] for f in festive.active(date(2026, 10, 9))] == ["Deepavali"]          # 30 days before 8 Nov
+    assert festive.active(date(2026, 11, 12)) == []                                        # between Deepavali and Christmas
+    assert [f["name"] for f in festive.active(date(2026, 12, 26))] == ["Christmas", "Chinese New Year"]   # handover day
+    assert festive.terms(date(2027, 3, 1)) == ["dates", "ketupat", "rendang paste", "kuih"]
+    assert all(n in festive.ITEMS for n, _ in festive.DATES)

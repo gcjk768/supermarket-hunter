@@ -64,7 +64,13 @@ def _match(name: str, staples: list[str]) -> str:
 # ---- Sheng Siong: official RSS -> flyer JPG -> Claude reads it ----
 def shengsiong_flyers(days: int = 21, now: datetime | None = None) -> list[dict]:
     """Recent promo posts with a flyer image: [{title, published, image, link}]."""
-    root = ET.fromstring(_get(SS_FEED, 30))
+    raw = _get(SS_FEED, 30)
+    if b"incapsula" in raw[:4000].lower() or not raw.lstrip().startswith(b"<?xml"):
+        # the feed answers the NAS with an anti-bot page (seen 2026-10-09): blocked, not worked around
+        from . import vault
+        vault.log_event("⛔", "Sheng Siong flyer feed blocked", "anti-bot page instead of RSS, skipped", "Sheng Siong")
+        return []
+    root = ET.fromstring(raw)
     out, cutoff = [], (now or datetime.now(timezone.utc)) - timedelta(days=days)
     for it in root.iter("item"):
         title = (it.findtext("title") or "").strip()

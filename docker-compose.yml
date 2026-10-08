@@ -10,8 +10,9 @@ services:
     container_name: supermarket-hunter
     restart: unless-stopped
     init: true
-    # the NAS has no free compose subnets left ("all predefined address pools have been fully subnetted"); outbound only, so the default bridge is fine
-    network_mode: bridge
+    # scrape-net: the shared Playwright server (ws://playwright:3000) for pages Jina cannot read. External network, so no new
+    # compose subnet is needed (the NAS has none left)
+    networks: [scrape-net]
     ports:
       - "8790:8000"   # family web page: http://<nas-ip>:8790
     env_file: .env
@@ -19,8 +20,9 @@ services:
       TZ: Asia/Singapore
       DATA_DIR: /app/data
       VAULT_DIR: /vault
-      REPORT_AT: "daily 08:00"     # or "mon 08:00" for weekly
-      PROMO_CHECK_HOURS: "3"       # push new promos on the staples this often (0 = off)
+      REPORT_AT: "daily 08:00"     # full refresh (every store + flyers)
+      PROMO_CHECK_HOURS: "3"       # quick price refresh between the daily runs (0 = off)
+      PLAYWRIGHT_WS_URL: ws://playwright:3000/
     volumes:
       - ./data:/app/data
       # Obsidian vault: movement log + memory
@@ -31,6 +33,8 @@ services:
         max-size: "5m"
         max-file: "3"
     # One shot commands on the NAS:
-    #   docker compose exec supermarket-hunter python -m smh hello
-    #   docker compose exec supermarket-hunter python -m smh report
+    #   docker compose exec supermarket-hunter python -m smh refresh     # full refresh now
     #   docker compose exec supermarket-hunter python -m smh ask eggs
+networks:
+  scrape-net:
+    external: true

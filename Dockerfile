@@ -4,6 +4,8 @@ ENV PYTHONUNBUFFERED=1 TZ=Asia/Singapore DISABLE_AUTOUPDATER=1 CLAUDE_CONFIG_DIR
 # curl, ca-certificates and git are for the Claude Code installer (reads the Sheng Siong flyer JPG)
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
+# Playwright client only (no browsers): it drives the shared Playwright server on the NAS over scrape-net
+RUN pip install --no-cache-dir playwright==1.63.0
 
 WORKDIR /app
 

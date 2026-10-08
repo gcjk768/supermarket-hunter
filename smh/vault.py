@@ -1,8 +1,9 @@
 """Obsidian vault (VAULT_DIR): the bot's movement log and memory, per the NAS vault standard.
 
 * ``Activity/YYYY/MM/YYYY-MM-DD.md``: one line per event, ``- HH:MM emoji **what** · detail · [[entity]]`` (SGT)
-* ``Items/<staple>.md``: one note per staple, append-only ``## History`` (best value each week)
-* ``Reports/YYYY/MM/YYYY-MM-DD Weekly.md``: the weekly report as plain text
+* ``Items/<staple>.md``: one note per staple, append-only ``## History`` (best value at every refresh)
+* ``Stores/<supermarket>.md``: one note per supermarket, append-only ``## History`` (what was read from it, blocks)
+* ``Reports/YYYY/MM/YYYY-MM-DD Daily prices.md``: the 08:00 run as a table
 * ``Home.md``: what this is, the current month, the latest day notes
 
 Best effort throughout: any error is logged and ignored, the vault never breaks a run or loses a post.
@@ -31,7 +32,7 @@ def note_name(title: str) -> str:
 
 
 def _field(text) -> str:
-    return " ".join(str(text).split()).replace("·", ",")
+    return " ".join(str(text).split()).replace(" · ", " – ").replace("·", "–")   # "·" separates the fields of a log line
 
 
 def _day_path(r: Path, day: date) -> Path:
@@ -67,19 +68,19 @@ def log_event(emoji: str, what: str, detail: str = "", entity: str | None = None
         log.warning("vault write skipped: %s", ex)
 
 
-def history(name: str, line: str, summary: str = "") -> None:
-    """Append one dated line to Items/<name>.md, creating the note with its summary on first use."""
+def history(name: str, line: str, summary: str = "", folder: str = "Items") -> None:
+    """Append one dated line to <folder>/<name>.md (Items or Stores), creating the note with its summary on first use."""
     r = root()
     if r is None:
         return
     try:
         now = datetime.now(TZ)
-        path = r / "Items" / f"{note_name(name)}.md"
+        path = r / folder / f"{note_name(name)}.md"
         old = path.read_text(encoding="utf-8") if path.exists() else ""
         hist = old.split("## History\n", 1)[1].rstrip("\n").splitlines() if "## History\n" in old else []
         hist.append(f"- {now:%Y-%m-%d %H:%M} {_field(line)}")
         body = ["---", "tags: [active]", f"updated: {now:%Y-%m-%d}", "---", f"# {note_name(name)}", "",
-                summary or "Tracked staple.", "", "## History", *hist]
+                summary or f"Tracked by Supermarket Hunter ({folder.lower()}).", "", "## History", *hist]
         _write(path, "\n".join(body) + "\n")
     except Exception as ex:   # noqa: BLE001
         log.warning("vault note skipped: %s", ex)
@@ -105,13 +106,21 @@ def write_home() -> None:
         now = datetime.now(TZ)
         latest = [d for d in (now.date() - timedelta(days=i) for i in range(30)) if _day_path(r, d).is_file()][:7]
         items = sorted(p.stem for p in (r / "Items").glob("*.md")) if (r / "Items").is_dir() else []
+        stores = sorted(p.stem for p in (r / "Stores").glob("*.md")) if (r / "Stores").is_dir() else []
+        reports = sorted((p.stem for p in (r / "Reports").rglob("*.md")), reverse=True)[:7] if (r / "Reports").is_dir() else []
         lines = ["---", "tags: [active]", f"updated: {now:%Y-%m-%d}", "---", "# Supermarket Hunter", "",
-                 "Written by Supermarket Hunter, the family grocery price bot (FairPrice via Jina Reader). "
-                 "`Activity/YYYY/MM/` is the movement log (reports, /ask answers, staples changes, errors); "
-                 "`Items/` holds one note per staple with the weekly best value; `Reports/` keeps each weekly report.", "",
+                 "Written by Supermarket Hunter, the family grocery price web page on the home NAS (http://<nas-ip>:8790). "
+                 "Prices come from Cold Storage (Jina Reader) and FairPrice (the NAS Playwright browser), flyers from the other "
+                 "stores. Nothing is sent anywhere; this vault is the record of every movement.", "",
+                 "- `Activity/YYYY/MM/` · the movement log: refreshes, every staple's result, new promotions, browser fetches "
+                 "and blocks, flyers, logos, page visits, errors",
+                 "- `Items/` · one note per staple, the best value at every refresh",
+                 "- `Stores/` · one note per supermarket, what was read from it",
+                 "- `Reports/` · the 08:00 run as a table", "",
                  f"- **This month:** `Activity/{now:%Y/%m}/` · today [[{now:%Y-%m-%d}]]",
-                 "- **Latest notes:** " + (", ".join(f"[[{d.isoformat()}]]" for d in latest) or "none yet"), "",
-                 "## Items", *[f"- [[{w}]]" for w in items]]
+                 "- **Latest days:** " + (", ".join(f"[[{d.isoformat()}]]" for d in latest) or "none yet"),
+                 "- **Latest reports:** " + (", ".join(f"[[{x}]]" for x in reports) or "none yet"), "",
+                 "## Items", *[f"- [[{w}]]" for w in items], "", "## Stores", *[f"- [[{w}]]" for w in stores]]
         _write(r / "Home.md", "\n".join(lines) + "\n")
     except Exception as ex:   # noqa: BLE001
         log.warning("vault home skipped: %s", ex)

@@ -1,9 +1,10 @@
 # Supermarket Hunter
 
-Family grocery price bot for Singapore. Every morning (08:00) it finds the **best value** pack of each staple the family
-cooks with: price per 100g / 100ml / piece, so a 10kg bag and a 5kg bag compare fairly, with trusted brands first.
-It posts the result to Telegram and shows it on a **web page on the home network**, with product photos and one tap
-through to the shop's own product page.
+Family grocery price web page for Singapore. Every morning (08:00) it finds the **best value** pack of each staple the
+family cooks with: price per 100g / 100ml / piece, so a 10kg bag and a 5kg bag compare fairly, with trusted brands first.
+It shows everything on a **web page on the home network**, with product photos, the supermarkets' own logos and one tap
+through to the shop's product page. Nothing is sent anywhere: the page is the only output, and an Obsidian vault on the
+NAS records every movement.
 
 ![Today's Best Buys web page](docs/web-page.png)
 
@@ -14,71 +15,63 @@ through to the shop's own product page.
 Editable source: [`docs/architecture.drawio`](docs/architecture.drawio) (open in [draw.io](https://app.diagrams.net); regenerate with
 `python tools/gen_arch.py docs/architecture.drawio`).
 
-One Docker container on a home NAS runs `python -m smh serve`, which starts four threads:
+One Docker container on a home NAS runs `python -m smh serve`:
 
 | Thread | When | Does |
 |---|---|---|
-| Scheduler | daily 08:00 SGT | full report: every staple, every store, plus the flyer promos → Telegram |
-| Promo watcher | every 3 h | re-checks the staples and pushes promos not announced in the last 14 days |
-| Telegram listener | always | `/ask`, `/report`, `/promos`, `/flyers`, `/staples` and the inline buttons |
+| Full refresh | daily 08:00 SGT | every staple at every store we can read, plus the flyer sources |
+| Quick refresh | every 3 h | Cold Storage prices again, so new promotions reach the page within hours |
 | **Web server** | always | the family web page on port 8790 |
 
-**The data path (steps 1–4 in the diagram)**
-1. A timer or a command starts a run.
-2. `smh/scrape.py` reads the shop's search page through [Jina Reader](https://r.jina.ai), which returns the page as Markdown.
-   Each product is one Markdown link: name, price, old price, promo, product URL, and the photo on the line above.
-   `smh/flyers.py` does the same for promotion pages; the Sheng Siong flyer is a JPG, so Claude reads the image.
-3. Every row is saved to `data/prices.db` (SQLite) with its unit price and photo URL. The history is what makes
-   "cheaper ▼ / dearer ▲ since last time" and "lowest in 8 weeks, stock up" possible.
-4. `smh/cards.py` turns the results into Telegram HTML cards.
+**The data path**
+1. A refresh searches each staple. Cold Storage is read through [Jina Reader](https://r.jina.ai), which returns the page
+   as Markdown: one link per product with name, price, old price, promo and photo.
+2. FairPrice search, and any page Jina cannot read, goes through a shared **Playwright** browser on the NAS
+   (`ws://playwright:3000` on the Docker network `scrape-net`). Its product links are turned into the same Markdown, so one
+   parser per store serves both routes. A captcha / challenge page or a 429 stops the fetch; it is never worked around.
+3. Every row is saved to `data/prices.db` (SQLite) with its unit price and photo URL. The history gives
+   "cheaper ▼ / dearer ▲ since last time", "lowest in 8 weeks, stock up" and 🆕 for promotions first seen today.
+4. Flyer sources (FairPrice promotions, Sheng Siong's flyer read by Claude, Giant's promotion page, singpromos.com) go to
+   `data/flyers.json`.
 
-**The web page (steps 5–7)**
-5. A browser on the home Wi-Fi opens `http://<nas-ip>:8790`. Docker maps NAS port 8790 to port 8000 in the container.
-6. `smh/web.py` (Python's built-in `http.server`, no framework) reads the newest prices for each staple from
-   `prices.db`, the staples and trusted brands from `config.json`, and the last flyer run from `flyers.json`, and
-   draws the page **on every visit**. There is no separate "publish" step that could go stale: the page is always
-   exactly as fresh as the database, and the header shows the date the prices were checked (in red if the morning
-   run failed).
-7. Every card is a link to the product on the shop's own website. Photos load straight from the shop's image server.
+**The web page** (`smh/web.py`, Python's built-in `http.server`): a browser on the home Wi-Fi opens
+`http://<nas-ip>:8790`; the page is drawn from the database **on every visit**, so it is always as fresh as the data, and
+the header shows the date the prices were checked (in red if the morning run failed). One screen at a time, no scrolling
+on a laptop:
 
-**What the page looks like:** one category per screen, no scrolling on a laptop. A category list on the left; the
-chosen category shows its best-value pack as a big price tag (★ = a brand the family trusts) and the next nine products
-in a 3×3 grid, cheapest per 100g first, each with its photo, price, per-100g price and any offer. Big ‹ previous /
-next › buttons (or the arrow keys) step through the categories. The key (▼ cheaper, ▲ dearer, NEW, ★ trusted brand)
-sits in the header. Large type (Atkinson Hyperlegible, designed for low-vision readers) and Chinese names for each staple.
+- **🏷 Promotions** (first): every current promotion on the staples, new ones first, then the biggest saving.
+- **One screen per staple**: the best-value pack as a big price tag (★ = a brand the family trusts) and the next nine in a
+  3×3 grid, cheapest per 100g first. Big ‹ previous / next › buttons (or the arrow keys) step through.
+- **By supermarket**: all eight Singapore supermarkets with their official logos (downloaded once from each store's own
+  website into `data/logos/`). FairPrice and Cold Storage show their best value per staple (🏆 = cheapest of all the
+  stores); the others show their flyer deals, a link to their shop and the plain reason there are no shelf prices.
+- **Festive seasons** (`smh/festive.py`): about six weeks before Deepavali, Christmas, Chinese New Year, Hari Raya
+  Puasa / Haji and Mid-Autumn, that festival's shopping items (bak kwa, mandarin oranges, log cake, ghee…) appear as their
+  own group, searched and shown like the staples; they disappear after the day.
+- **📰 Flyers**.
 
-**⭐ Top 10 bought:** no supermarket publishes how often an item is bought, so the family counts their own. Every
-product has a **🧺 I bought it** button (`POST /bought`); a second tap the same day undoes it. The Top 10 tab ranks
-what the family buys most, with today's price for each. The server only records products it already has a price for,
-caps the request size and refuses requests from other websites.
+Every card links to the product on the shop's own website. Large type (Atkinson Hyperlegible), Chinese names for each staple.
 
-## Telegram commands (in the bot's own topic, or a private chat for allowed users)
-| Command | What |
-|---|---|
-| `/ask eggs` (also `/askretailer`, `/price`) | 5 cheapest per unit across the stores, ★ trusted brands, 🟢 deals, store links |
-| `/report` | run the report now |
-| `/promos` | every current promo on the staples (new ones are pushed automatically every 3 h) |
-| `/flyers` | FairPrice `/promotions`, Sheng Siong flyer (read by Claude), Giant campaigns, singpromos.com posts |
-| `/staples` · `/staples add kailan` · `/staples del tomato` | the watched list |
-| `/shophelp` | help |
-
-Buttons on the last message: 🔄 Run again · 📋 Staples.
+**The vault**: `/volume1/<USER>/Obsidian/Supermarket Hunter/` (mounted at `/vault`) records every movement:
+`Activity/YYYY/MM/` (refreshes, each staple's result, new promotions, browser fetches and blocks, flyers, logos, page
+visits, errors), `Items/` (one note per staple), `Stores/` (one note per supermarket), `Reports/` (the 08:00 run as a table).
 
 ## Sources and rules
-- **Cold Storage** online search (robots.txt allows it). **FairPrice** search is not scraped (robots.txt disallows
-  `/search`); only its `/promotions` page is read, under a named personal-use exception, a few requests a day.
-- A 403 / 429 / captcha is never retried or routed around: the site is marked blocked and skipped.
-- Two seconds between searches. `STORES` in `smh/scrape.py` is the registry.
+- **Cold Storage** search through Jina (robots.txt allows it). **FairPrice** search through the NAS browser, once a day,
+  one page at a time (its robots.txt disallows `/search` for crawlers; the owner's rule allows the NAS browser for such
+  pages at personal, low volume). Its `/promotions` page is read through Jina.
+- **Sheng Siong**'s shop is behind an anti-bot check, and since 2026-10-09 its flyer feed answers the NAS with the same check:
+  nothing is read, never bypassed. **Giant** has no online shop any more (foodpanda app only): its promotion page only. **Prime**, **Hao Mart**, **RedMart**, **Amazon Fresh**: no prices we can read.
+- No stealth plugins, proxies, rotating IPs or captcha solvers. A few seconds between pages.
 
 ## Run
 ```bash
-cp .env.example .env          # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_THREAD_ID
+cp .env.example .env          # optional JINA_API_KEY, CLAUDE_CODE_OAUTH_TOKEN (Sheng Siong flyer)
+docker network create scrape-net   # once; the shared Playwright server joins it too
 docker compose up -d --build
 # web page: http://<nas-ip>:8790   (WEB_PORT inside the container, default 8000; 0 turns it off)
-docker compose exec supermarket-hunter python -m smh hello     # posts the help card: proves token + topic
-docker compose exec supermarket-hunter python -m smh report    # report now
-python -m pytest tests -q                                      # local checks
+docker compose exec supermarket-hunter python -m smh refresh     # full refresh now
+docker compose exec supermarket-hunter python -m smh ask eggs    # quick look from the shell
+python -m pytest tests -q                                        # local checks
 ```
-Staples and trusted brands live in `data/config.json` (created on first run from `smh/store.py` DEFAULT).
-The Sheng Siong flyer needs `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`); without it that one source is skipped.
-Everything else is Python stdlib, no API keys needed.
+Staples and trusted brands live in `data/config.json` (created on first run from `smh/store.py` DEFAULT; edit it by hand).

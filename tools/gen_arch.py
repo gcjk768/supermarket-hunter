@@ -58,14 +58,14 @@ def e(src, dst, label="", color="#555555", dashed=False, both=False, ex=None, en
                  f'target="{dst}"><mxGeometry relative="1" as="geometry">{pts_xml}</mxGeometry></mxCell>')
 
 
-v("title", "<b>🛒 SUPERMARKET HUNTER · how it works</b><br>Daily grocery prices for the family: a Telegram report and a web page "
-  "on the home network", 20, 10, 1460, 50, "text;html=1;align=left;verticalAlign=middle;fontSize=15")
+v("title", "<b>🛒 SUPERMARKET HUNTER · how it works</b><br>Daily grocery prices for the family, on a web page "
+  "on the home network (no messages are sent anywhere)", 20, 10, 1460, 50, "text;html=1;align=left;verticalAlign=middle;fontSize=15")
 
 # ---- internet ----
 v("g_net", "🌐 Internet · only pages the sites allow", 20, 70, 390, 790, GROUP + "fillColor=#EAF2FB;strokeColor=#1D4FA3;fontColor=#1D4FA3")
 icon("cs", "cart", "<b>Cold Storage</b><br>/search?q=eggs", 190, 110, pos=left(150))
-icon("fp", "cart", "<b>FairPrice</b><br>/promotions page", 190, 190, pos=left(150))
-v("jina", "<b>Jina Reader</b><br>page → Markdown", 330, 150, 52, 52, ICON["globe"] + BELOW)
+icon("fp", "cart", "<b>FairPrice</b><br>/search + /promotions", 190, 190, pos=left(150))
+v("jina", "<b>Jina Reader</b><br>page → Markdown", 330, 205, 52, 52, ICON["globe"] + BELOW)
 icon("claude", "claude", "<b>Claude</b> (Anthropic API)<br>reads the flyer image", 330, 290, pos=left(260))
 icon("giant", "news", "<b>Giant</b> promotion page", 330, 380, pos=left(260))
 icon("sp", "news", "<b>singpromos.com</b> posts", 330, 460, pos=left(260))
@@ -76,37 +76,37 @@ icon("shop", "web", "<b>Shop product pages</b><br>+ product photos", 330, 720, p
 v("g_nas", "🏠 Home NAS · UGREEN DXP4800 Pro", 450, 70, 650, 790, GROUP + "fillColor=#F5F5F5;strokeColor=#555555;fontColor=#333333")
 v("g_ctr", "", 470, 160, 610, 540, "rounded=1;whiteSpace=wrap;html=1;arcSize=3;fillColor=#FFF8E6;strokeColor=#E6A72A;strokeWidth=2;dashed=1")
 icon("docker", "docker", "<b>Docker container supermarket-hunter</b> · python -m smh serve", 480, 112, 40, pos=right(420))
-box("sched", "⏰ <b>Scheduler</b><br>daily 08:00 SGT report", 490, 185, 175, 60, "#FFFFFF", "#E6A72A")
-box("watch", "🔔 <b>Promo watcher</b><br>every 3 hours", 690, 185, 175, 60, "#FFFFFF", "#E6A72A")
-box("listen", "💬 <b>Telegram listener</b><br>/ask /report /promos /flyers", 890, 185, 175, 60, "#FFFFFF", "#229ED9")
+box("sched", "⏰ <b>Full refresh</b><br>daily 08:00 · all stores + flyers", 490, 185, 175, 60, "#FFFFFF", "#E6A72A")
+box("watch", "🔁 <b>Quick refresh</b><br>prices every 3 hours", 690, 185, 175, 60, "#FFFFFF", "#E6A72A")
+box("pw", "🎭 <b>Playwright server</b><br>shared container · scrape-net", 890, 185, 175, 60, "#F3ECFA", "#6B3FA0", "dashed=1;")
 box("flyers", "<b>flyers.py</b><br>flyer &amp; promo-page items", 490, 290, 175, 66, "#DAE8FC", "#1D4FA3")
 box("scrape", "<b>scrape.py</b><br>products · price per 100g · photo", 690, 290, 175, 66, "#DAE8FC", "#1D4FA3")
-box("cards", "<b>cards.py</b><br>Telegram HTML cards", 890, 290, 175, 66, "#E1F3FB", "#229ED9")
 icon("db", "sql", "<b>prices.db</b><br>SQLite · history + photos", 755, 430, 44, pos=right(140))
 box("fj", "📰 <b>flyers.json</b><br>last flyer run", 590, 520, 110, 50, "#FFFFFF", "#888888")
 box("cfg", "📋 <b>config.json</b><br>staples + brands", 945, 430, 120, 50, "#FFFFFF", "#888888")
-box("web", "🌐 <b>web.py</b> · built-in web server<br>draws the page from the database on every visit", 600, 610, 380, 66, "#FBE3DD", "#C2391B", "fontSize=13;")
-icon("vault", "obsidian", "<b>Obsidian vault</b> · every run writes its activity log here, and reads it back as memory", 490, 740, 40, pos=right(500))
+box("web", "🌐 <b>web.py</b> · built-in web server<br>Promotions · 14 categories · 8 supermarkets · flyers", 600, 610, 380, 66, "#FBE3DD", "#C2391B", "fontSize=13;")
+icon("vault", "obsidian", "<b>Obsidian vault</b> · records every movement: refreshes, each staple, new promotions, browser fetches and blocks, flyers, logos, page visits", 490, 740, 40, pos=right(560))
 
 # ---- family ----
 v("g_fam", "👪 Family · home Wi-Fi", 1140, 70, 340, 790, GROUP + "fillColor=#EAF6EC;strokeColor=#2C6E3F;fontColor=#2C6E3F")
-icon("tg", "telegram", "<b>Telegram group topic</b><br>08:00 report, promo alerts, commands", 1160, 170, 56, pos=right(230))
-v("legend", "<b>Flow</b><br>1 A timer or a command starts a run<br>2 Jina returns allowed pages as Markdown<br>"
-  "3 Rows (price, unit price, promo, photo) go into prices.db<br>4 Report and alerts go to Telegram<br>"
-  "5 The laptop asks the NAS for the page (port 8790)<br>6 web.py reads the database and draws it<br>7 Tap a card → the shop's own product page",
-  1160, 390, 305, 190, "rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2C6E3F;align=left;verticalAlign=top;spacing=10;fontSize=12")
+v("legend", "<b>Flow</b><br>1 The 08:00 run and a quick check every 3 h start a refresh<br>2 Jina returns allowed pages as Markdown; "
+  "FairPrice search, and any page Jina cannot read, go through the Playwright browser (a captcha or 429 = stop)<br>"
+  "3 Rows (price, unit price, promo, photo) go into prices.db<br>"
+  "4 The laptop asks the NAS for the page (port 8790)<br>5 web.py reads the database and draws it<br>6 Tap a card → the shop's own product page",
+  1160, 150, 305, 260, "rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2C6E3F;align=left;verticalAlign=top;spacing=10;fontSize=12")
 icon("laptop", "laptop", "<b>Parents' laptop</b><br>http://&lt;nas-ip&gt;:8790<br><i>Today's Best Buys · 今日好价</i>", 1160, 611, 64, pos=right(190))
 
-B, T, R, Y = "#1D4FA3", "#229ED9", "#C2391B", "#E6A72A"
+B, R, Y, P = "#1D4FA3", "#C2391B", "#E6A72A", "#6B3FA0"
 # 1 triggers
 e("sched", "flyers", "1", Y, ex=(0.5, 1), en=(0.5, 0))
 e("sched", "scrape", "", Y, ex=(0.8, 1), en=(0.3, 0), pts=[(630, 262), (742, 262)])
 e("watch", "scrape", "", Y, ex=(0.5, 1), en=(0.5, 0))
-e("listen", "scrape", "", T, ex=(0.2, 1), en=(0.9, 0), pts=[(925, 275), (847, 275)])
 # 2 internet -> modules
-e("cs", "jina", "", B, ex=(1, 0.5), en=(0, 0.5), pts=[(290, 136), (290, 176)])
-e("fp", "jina", "", B, ex=(1, 0.5), en=(0, 0.5), pts=[(290, 216), (290, 176)])
-e("jina", "scrape", "2 Markdown", B, ex=(1, 0.5), en=(0.7, 0), pts=[(430, 176), (430, 268), (812, 268)])
+e("cs", "jina", "", B, ex=(1, 0.5), en=(0, 0.5), pts=[(290, 136), (290, 231)])
+e("fp", "jina", "", B, ex=(1, 0.5), en=(0, 0.5), pts=[(290, 216), (290, 231)])
+e("jina", "scrape", "2 Markdown", B, ex=(1, 0.5), en=(0.7, 0), pts=[(430, 231), (430, 268), (812, 268)])
+e("pw", "fp", "FairPrice search (daily) · Jina fallback", P, dashed=True, ex=(0.5, 0), en=(0.5, 0), pts=[(977, 176), (216, 176)])
+e("scrape", "pw", "", P, both=True, ex=(0.95, 0), en=(0.3, 1), pts=[(856, 278), (942, 278)])
 e("claude", "flyers", "flyer JPG", B, both=True, ex=(1, 0.5), en=(0, 0.4))
 e("giant", "flyers", "", B, ex=(1, 0.5), en=(0.15, 1), pts=[(516, 406)])
 e("sp", "flyers", "", B, ex=(1, 0.5), en=(0.3, 1), pts=[(542, 486)])
@@ -114,16 +114,12 @@ e("ss", "flyers", "", B, ex=(1, 0.5), en=(0.45, 1), pts=[(569, 566)])
 # 3 save
 e("scrape", "db", "3 save rows", B, ex=(0.37, 1), en=(0.5, 0))
 e("flyers", "fj", "", B, ex=(0.85, 1), en=(0.45, 0))
-# 4 telegram
-e("scrape", "cards", "", T, ex=(1, 0.5), en=(0, 0.5))
-e("cards", "tg", "4 HTML cards", T, ex=(1, 0.5), en=(0.5, 1), pts=[(1188, 323)])
-e("tg", "listen", "commands", T, dashed=True, ex=(0, 0.5), en=(1, 0.25))
 # 5-7 web page
-e("laptop", "web", "5 GET /  (8790 → 8000)", R, both=True, ex=(0, 0.5), en=(1, 0.5))
-e("db", "web", "6", R, ex=(0.5, 1), en=(0.47, 0))
+e("laptop", "web", "4 GET /  (8790 → 8000)", R, both=True, ex=(0, 0.5), en=(1, 0.5))
+e("db", "web", "5", R, ex=(0.5, 1), en=(0.47, 0))
 e("fj", "web", "", R, ex=(0.45, 1), en=(0.115, 0))
 e("cfg", "web", "", R, ex=(0.5, 1), en=(0.85, 0), pts=[(1005, 590), (923, 590)])
-e("laptop", "shop", "7 tap a card → shop page", R, dashed=True, ex=(0.5, 1), en=(0.5, 1), pts=[(1192, 840), (356, 840)])
+e("laptop", "shop", "6 tap a card → shop page", R, dashed=True, ex=(0.5, 1), en=(0.5, 1), pts=[(1192, 840), (356, 840)])
 
 xml = ('<mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" page="1" pageWidth="1500" pageHeight="880" background="#FFFFFF">'
        '<root><mxCell id="0"/><mxCell id="1" parent="0"/>' + "".join(cells) + "</root></mxGraphModel>")

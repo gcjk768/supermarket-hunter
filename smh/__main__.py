@@ -1,4 +1,4 @@
-"""python -m smh serve | report | ask <item> | hello | health"""
+"""python -m smh serve | refresh | ask <item> | health"""
 import logging
 import os
 import sys
@@ -10,25 +10,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def main(argv: list[str]) -> int:
-    from . import cards, serve
+    from . import cards, scrape, serve
     cmd = argv[0] if argv else "serve"
     if cmd == "serve":
         serve.main()
-    elif cmd == "report":
-        serve.App().send_weekly()
-    elif cmd == "promos":
-        serve.App().send_promos()
-    elif cmd == "flyers":
-        app = serve.App()
-        texts = app.flyer_texts()
-        app.tg.post(texts) if app.tg and app.chat_id else print("\n\n".join(texts))
-    elif cmd == "ask":
-        app = serve.App()
-        print("\n\n".join(app.cmd_ask(" ".join(argv[1:]))))
-    elif cmd == "hello":
-        app = serve.App()
-        app.tg.post([cards.HELP], serve.BUTTONS)
-        print("sent")
+    elif cmd == "refresh":   # full refresh now (what the 08:00 job does)
+        print(serve.App().refresh(full=True))
+    elif cmd == "ask":   # quick look from the shell: cheapest per unit first
+        for r in scrape.search(" ".join(argv[1:]))[:10]:
+            print(f"{cards.money(r['price']):>8}  {cards.unit(r):>14}  {r['store']:<12} {r['name'][:60]}  {r['promo']}")
     elif cmd == "health":
         hb = Path(os.environ.get("DATA_DIR", "data")) / "heartbeat"
         return 0 if hb.exists() and time.time() - float(hb.read_text()) < 180 else 1
