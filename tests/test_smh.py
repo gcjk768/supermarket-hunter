@@ -245,3 +245,62 @@ def test_regular_checks_and_health(monkeypatch, tmp_path):
     assert serve.health_problem(tmp_path, 8000, datetime.now(tz).replace(hour=11)) == ""
     monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=15: (_ for _ in ()).throw(OSError("down")))
     assert "web page not answering" in serve.health_problem(tmp_path, 8000, t(9))
+
+
+def test_sold_counts_and_most_bought(tmp_path, monkeypatch):
+    from smh import web
+    md = scrape._md_line("https://www.lazada.sg/products/pdp-i1.html", "RedMart 15 Eggs 15 X 60G\n$4.65\n9% Off\n2.0M sold\n(40258)", "https://i/1.jpg")
+    r = scrape.parse_redmart(md)[0]
+    assert r["sold"] == 2_000_000 and r["name"] == "RedMart 15 Eggs 15 X 60G"     # the count is kept, not part of the name
+    r2 = scrape.parse_redmart(scrape._md_line("https://www.lazada.sg/products/pdp-i2.html", "Freedom Eggs 12s 800g\n$9.60\n95.8K sold", ""))[0]
+    st = Store(tmp_path)
+    st.save_config({"staples": ["eggs"], "brands": {}})
+    st.save(date(2026, 10, 9), "eggs", [r2, r])
+    st.db.close()
+    page = web.page(tmp_path)
+    top = page.split('id="top"')[1].split("</section>")[0]
+    assert top.index("2.0M sold") < top.index("95.8K sold")                   # best seller first
+
+
+def test_search_spellings(monkeypatch):
+    seen = []
+    monkeypatch.setattr(scrape, "fetch", lambda url, line, sleep, route: seen.append(url) or
+                        "[$2.50 Baby Cai Xin 300g](https://coldstorage.com.sg/product/cx)")
+    one = {"Cold Storage": ("https://x.test/?q={}", scrape.CS_LINE, "jina")}
+    rows = scrape.search("choy sum", stores=one, sleep=lambda s: None)
+    assert len(seen) == 3 and len(rows) == 1                                     # 3 spellings searched, same product once
+
+
+def test_page_reads_while_a_refresh_writes(tmp_path):
+    """A page view must not fail while another process holds a write transaction (WAL + read-only open)."""
+    from smh import web
+    st = Store(tmp_path)
+    st.save_config({"staples": ["eggs"], "brands": {}})
+    st.save(date(2026, 10, 9), "eggs", [r for r in scrape.parse(MD) if "Eggs" in r["name"]])
+    import sqlite3
+    writer = sqlite3.connect(tmp_path / "prices.db", isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")                       # a refresh in the middle of writing
+    writer.execute("INSERT INTO alerts VALUES('u', 'p', '2026-10-09')")
+    assert "Farm Choice" in web.page(tmp_path)              # the page still renders
+    writer.execute("COMMIT")
+    assert st.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_blocked_site_cools_off_and_redmart_once_a_day(monkeypatch):
+    calls = []
+    monkeypatch.setattr(scrape, "fetch", lambda url, line, sleep, route: calls.append(url) or "")
+    stores = {"RedMart": ("https://www.lazada.sg/catalog/?q={}", scrape.RM_LINE, "browser-card"),
+              "Cold Storage": ("https://coldstorage.com.sg/search?q={}", scrape.CS_LINE, "jina")}
+    monkeypatch.setattr(scrape, "_last_read", {})
+    monkeypatch.setattr(scrape, "_blocked_until", {})
+    scrape.start_pass()
+    scrape.search("eggs", stores=stores, sleep=lambda s: None)
+    assert any("lazada" in u for u in calls)                    # first full pass of the day: RedMart read
+    calls.clear()
+    scrape.start_pass()                                         # 3 hours later
+    scrape.search("eggs", stores=stores, sleep=lambda s: None)
+    assert not any("lazada" in u for u in calls) and calls      # RedMart not again today; Cold Storage still read
+    calls.clear()
+    scrape._block("https://coldstorage.com.sg/search?q=eggs", "challenge page")
+    scrape.search("eggs", stores=stores, sleep=lambda s: None)
+    assert calls == []                                          # blocked site left alone (24 h)

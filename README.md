@@ -61,12 +61,13 @@ visits, errors), `Items/` (one note per staple), `Stores/` (one note per superma
 - **Cold Storage** search through Jina (robots.txt allows it). **FairPrice** search through the NAS browser, once a day,
   one page at a time (its robots.txt disallows `/search` for crawlers; the owner's rule allows the NAS browser for such
   pages at personal, low volume). Its `/promotions` page is read through Jina.
-- **RedMart** (on Lazada) search through the NAS browser, once a day: its search cards keep the price beside the product
+- **RedMart** (on Lazada) search through the NAS browser, once a day (Lazada shows a slider check if asked often): its search cards keep the price beside the product
   link, so the browser reads the whole card.
 - **Prime** has no online shop: its weekly flyer picture (Advertised Offers page) is read by Claude, once a day.
 - **Sheng Siong**'s shop is behind an anti-bot check, and since 2026-10-09 its flyer feed answers the NAS with the same check:
   nothing is read, never bypassed. **Giant** has no online shop any more (foodpanda app only): its promotion page only.
 - **Hao Mart**'s online shop lists no products, even in a real browser.
+- A site that shows a challenge page is left alone for 24 hours and logged once.
 - No stealth plugins, proxies, rotating IPs or captcha solvers. A few seconds between pages.
 
 ## Run

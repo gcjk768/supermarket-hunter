@@ -40,6 +40,8 @@ class App:
             log.warning("FairPrice promotions rows skipped: %s", ex)
             fp_rows = []
         counts, table, per_store = {}, [], {}
+        if full:
+            scrape.start_pass()   # once-a-day stores (RedMart) join this pass only if not read in the last 20 h
         for f in festive.active(today):
             vault.log_event(f["emoji"], f"festive season: {f['name']}", f"{f['day']:%a %d %b} – searching {', '.join(f['items'])}")
         for staple in list(dict.fromkeys(cfg["staples"] + festive.terms(today))):   # staples + this season's festive items

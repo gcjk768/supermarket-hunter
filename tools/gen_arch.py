@@ -13,7 +13,6 @@ ICON = {
     "docker": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "assets/azure/1/Docker.svg",
     "sql": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "assets/databases/1/SQL.svg",
     "obsidian": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "assets/font-awesome/1/Obsidian_brand.svg",
-    "laptop": "image;html=1;image=https://app.diagrams.net/img/lib/clip_art/computers/Laptop_128x128.png",
     "web": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "icon-cache1/User_Interface-2098/UI_Internet_web_network_browser_globe-1446.svg",
 }
 GROUP = "rounded=1;whiteSpace=wrap;html=1;arcSize=3;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=15;fontStyle=1;strokeWidth=2;"
@@ -69,7 +68,6 @@ icon("claude", "claude", "<b>Claude</b> (Anthropic API)<br>reads the flyer image
 icon("giant", "news", "<b>Giant</b> promotion page", 330, 380, pos=left(260))
 icon("sp", "news", "<b>singpromos.com</b> posts", 330, 460, pos=left(260))
 icon("ss", "news", "<b>Sheng Siong</b> flyer<br>(RSS → JPG)", 330, 540, pos=left(260))
-icon("shop", "web", "<b>Shop product pages</b><br>+ product photos", 330, 720, pos=left(260))
 
 # ---- NAS ----
 v("g_nas", "🏠 Home NAS · UGREEN DXP4800 Pro", 450, 70, 650, 790, GROUP + "fillColor=#F5F5F5;strokeColor=#555555;fontColor=#333333")
@@ -91,9 +89,8 @@ v("g_fam", "👪 Family · home Wi-Fi", 1140, 70, 340, 790, GROUP + "fillColor=#
 v("legend", "<b>Flow</b><br>1 The 08:00 run and a quick check every 3 h start a refresh<br>2 Jina returns allowed pages as Markdown; "
   "FairPrice search, and any page Jina cannot read, go through the Playwright browser (a captcha or 429 = stop)<br>"
   "3 Rows (price, unit price, promo, photo) go into prices.db<br>"
-  "4 The laptop asks the NAS for the page (port 8790)<br>5 web.py reads the database and draws it<br>6 Tap a card → the shop's own product page",
+  "4 web.py reads the database and draws the page at http://&lt;nas-ip&gt;:8790",
   1160, 150, 305, 260, "rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2C6E3F;align=left;verticalAlign=top;spacing=10;fontSize=12")
-icon("laptop", "laptop", "<b>Parents' laptop</b><br>http://&lt;nas-ip&gt;:8790<br><i>Today's Best Buys · 今日好价</i>", 1160, 611, 64, pos=right(190))
 
 B, R, Y, P = "#1D4FA3", "#C2391B", "#E6A72A", "#6B3FA0"
 # 1 triggers
@@ -113,12 +110,10 @@ e("ss", "flyers", "", B, ex=(1, 0.5), en=(0.45, 1), pts=[(569, 566)])
 # 3 save
 e("scrape", "db", "3 save rows", B, ex=(0.37, 1), en=(0.5, 0))
 e("flyers", "fj", "", B, ex=(0.85, 1), en=(0.45, 0))
-# 5-7 web page
-e("laptop", "web", "4 GET /  (8790 → 8000)", R, both=True, ex=(0, 0.5), en=(1, 0.5))
-e("db", "web", "5", R, ex=(0.5, 1), en=(0.47, 0))
+# 4 web page
+e("db", "web", "4", R, ex=(0.5, 1), en=(0.47, 0))
 e("fj", "web", "", R, ex=(0.45, 1), en=(0.115, 0))
 e("cfg", "web", "", R, ex=(0.5, 1), en=(0.85, 0), pts=[(1005, 590), (923, 590)])
-e("laptop", "shop", "6 tap a card → shop page", R, dashed=True, ex=(0.5, 1), en=(0.5, 1), pts=[(1192, 840), (356, 840)])
 
 xml = ('<mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" page="1" pageWidth="1500" pageHeight="880" background="#FFFFFF">'
        '<root><mxCell id="0"/><mxCell id="1" parent="0"/>' + "".join(cells) + "</root></mxGraphModel>")

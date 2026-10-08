@@ -239,6 +239,27 @@ def promo_panel(staples: list[str], datas: dict, cfg: dict, new_urls: set[str], 
     return panel("promo", "🏷", "Promotions", "促销", sub, body, steps, "panel-scroll" if many else "")
 
 
+def sold_text(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}K" if n >= 1e3 else str(n)
+
+
+def most_bought_panel(items: list[str], datas: dict, cfg: dict, steps: str) -> str:
+    """RedMart's best sellers among the family's items: its search cards show how many have been sold."""
+    best, seen = [], set()
+    for s_ in items:
+        d = datas.get(s_)
+        for r in (d["rows"] if d else []):
+            if r["store"] == "RedMart" and r.get("sold") and r["url"] not in seen:
+                seen.add(r["url"])
+                best.append((r["sold"], s_, r))
+    best.sort(key=lambda t: -t[0])
+    cells = [cell(r, f"🔥 {sold_text(n)} sold · {s_}", cfg["brands"].get(s_, []), cards.EMOJI.get(s_, "🛒")) for n, s_, r in best[:10]]
+    body = (f'<div class="shelf shelf-store"><div class="grid grid-store">{"".join(cells)}</div></div>' if cells
+            else '<p class="empty">No sales counts yet: RedMart is read every 3 hours in the daytime.</p>')
+    return panel("top", "🔥", "Most bought", "最畅销", "RedMart's best sellers among your items · how many each has sold on RedMart",
+                 body, steps)
+
+
 def load_flyers(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8")).get("sections", {})
@@ -308,7 +329,8 @@ def page(data_dir: Path) -> str:
         present = {r["store"] for d in datas.values() if d for r in d["rows"]} | {k for k in flyer_by_store if k}
         stores = sorted(set(cards.STORE_ORDER) | present, key=lambda x: (cards.STORE_ORDER.index(x) if x in cards.STORE_ORDER else 99, x))
         store_ids = {x: "st-" + slug(x) for x in stores}
-        order = [("promo", "🏷", "Promotions")] + [(f"f{k}", f["emoji"], t.title()) for k, (f, t) in enumerate(fitems)] \
+        order = [("promo", "🏷", "Promotions"), ("top", "🔥", "Most bought")] \
+            + [(f"f{k}", f["emoji"], t.title()) for k, (f, t) in enumerate(fitems)] \
             + [(f"s{i}", cards.EMOJI.get(s, "🛒"), s.title()) for i, s in enumerate(staples)] \
             + [(store_ids[x], cards.STORE_EMOJI.get(x, "🏬"), x) for x in stores] + [("flyers", "📰", "Flyers")]
 
@@ -316,21 +338,22 @@ def page(data_dir: Path) -> str:
             return nav_buttons((order[k - 1][0], order[k - 1][2]) if k > 0 else None,
                                (order[k + 1][0], order[k + 1][2]) if k + 1 < len(order) else None)
 
-        panels, side, fside = [promo_panel(staples + [t for _, t in fitems], datas, cfg, new_urls, steps(0))], [], {}
+        every = staples + [t for _, t in fitems]
+        panels, side, fside = [promo_panel(every, datas, cfg, new_urls, steps(0)), most_bought_panel(every, datas, cfg, steps(1))], [], {}
         for k, (f, t) in enumerate(fitems):
             label = f'{f["emoji"]} For {f["name"]}, {f["day"]:%a %d %b}'
-            panels.append(staple_panel(f"f{k}", t, datas[t], cfg["brands"].get(t, []), steps(k + 1), em=f["emoji"], festive=label))
+            panels.append(staple_panel(f"f{k}", t, datas[t], cfg["brands"].get(t, []), steps(k + 2), em=f["emoji"], festive=label))
             fside.setdefault((f["name"], f["emoji"], f["day"]), []).append((f"f{k}", t))
         for i, s in enumerate(staples):
             d = datas[s]
-            panels.append(staple_panel(f"s{i}", s, d, cfg["brands"].get(s, []), steps(len(fitems) + i + 1)))
+            panels.append(staple_panel(f"s{i}", s, d, cfg["brands"].get(s, []), steps(len(fitems) + i + 2)))
             side.append((f"s{i}", cards.EMOJI.get(s, "🛒"), s.title(), " 💰" if d and d["stock"] else ""))
-        for k, x in enumerate(stores, len(fitems) + len(staples) + 1):
+        for k, x in enumerate(stores, len(fitems) + len(staples) + 2):
             panels.append(store_panel(store_ids[x], x, staples, datas, cfg, flyer_by_store.get(x, []), steps(k), data_dir))
         panels.append(flyers_panel(sections, steps(len(order) - 1)))
     finally:
         st.db.close()
-    nav = ('<a href="#promo" class="side-top">🏷 Promotions</a>'
+    nav = ('<a href="#promo" class="side-top">🏷 Promotions</a><a href="#top" class="side-top">🔥 Most bought</a>'
            # one dropdown per festival (native <details>: works without script); its items stay folded away until opened
            + "".join(f'<details class="fest"><summary><span>{em} {esc(name)}<small>{day:%a %d %b} · {len(items)} items</small></span></summary>'
                      + "".join(f'<a href="#{pid}">{esc(t.title())}</a>' for pid, t in items) + '</details>'
