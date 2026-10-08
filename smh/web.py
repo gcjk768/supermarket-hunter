@@ -334,8 +334,10 @@ def page(data_dir: Path) -> str:
     finally:
         st.db.close()
     nav = ('<a href="#promo" class="side-top">🏷 Promotions</a>'
-           + "".join(f'<span class="side-h side-fest">{em} {esc(name)} · {day:%d %b}</span>'
-                     + "".join(f'<a href="#{pid}">{esc(t.title())}</a>' for pid, t in items) for (name, em, day), items in fside.items())
+           # one dropdown per festival (native <details>: works without script); its items stay folded away until opened
+           + "".join(f'<details class="fest"><summary><span>{em} {esc(name)}<small>{day:%a %d %b} · {len(items)} items</small></span></summary>'
+                     + "".join(f'<a href="#{pid}">{esc(t.title())}</a>' for pid, t in items) + '</details>'
+                     for (name, em, day), items in fside.items())
            + ('<span class="side-h">Every day</span>' if fside else "")
            + "".join(f'<a href="#{pid}">{em} {esc(t)}{badge}</a>' for pid, em, t, badge in side)
            + '<span class="side-h">By supermarket</span>'
@@ -451,7 +453,13 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .side a:hover{{background:var(--card);border-color:var(--line)}}
 .side a[aria-current]{{background:var(--ink);color:var(--paper)}}
 .side .side-top{{border-color:var(--turmeric);margin-bottom:.3rem}}
-.side-fest{{color:var(--chili);font-size:.8rem}}
+.fest{{border-radius:12px;background:#fbefe9;border:2px solid #f0c9b8;margin:.15rem 0}}
+.fest summary{{cursor:pointer;font-weight:700;color:var(--chili);padding:.4rem .7rem;list-style:none;display:flex;justify-content:space-between;gap:.4rem}}
+.fest summary::-webkit-details-marker{{display:none}}
+.fest summary::after{{content:"▸";transition:transform .2s}}
+.fest[open] summary::after{{transform:rotate(90deg)}}
+.fest a{{display:block;padding-left:1.4rem}}
+.fest small{{display:block;font-weight:400;color:var(--muted);font-size:.8rem}}
 .side-h{{font-size:.75rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:.7rem .8rem .1rem}}
 .shelf.shelf-store{{grid-template-columns:1fr}}   /* more specific than the width rules for .shelf/.grid below */
 .grid.grid-store{{grid-template-columns:repeat(5,minmax(0,1fr))}}
@@ -573,7 +581,7 @@ var panels=[].slice.call(document.querySelectorAll('.panel')), links=[].slice.ca
 function show(){{
   var id=location.hash.slice(1); if(!document.getElementById(id)||!panels.some(function(p){{return p.id===id}})) id='{first}';
   panels.forEach(function(p){{p.hidden=p.id!==id}});
-  links.forEach(function(a){{if(a.getAttribute('href')==='#'+id){{a.setAttribute('aria-current','page');a.scrollIntoView({{block:'nearest'}});}}else a.removeAttribute('aria-current')}});
+  links.forEach(function(a){{if(a.getAttribute('href')==='#'+id){{a.setAttribute('aria-current','page');var f=a.closest('details');if(f)f.open=true;a.scrollIntoView({{block:'nearest'}});}}else a.removeAttribute('aria-current')}});
   window.scrollTo(0,0);
 }}
 window.addEventListener('hashchange',show); show();
