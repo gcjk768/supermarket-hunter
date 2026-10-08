@@ -1,0 +1,9 @@
+.env
+data/
+temp/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.csv
+report.md
+.playwright-mcp/

@@ -1,0 +1,36 @@
+services:
+  supermarket-hunter:
+    build:
+      context: .
+      args:
+        UID: 1000
+    # Dockge Update rebuilds from the code on disk
+    pull_policy: build
+    image: supermarket-hunter:local
+    container_name: supermarket-hunter
+    restart: unless-stopped
+    init: true
+    # the NAS has no free compose subnets left ("all predefined address pools have been fully subnetted"); outbound only, so the default bridge is fine
+    network_mode: bridge
+    ports:
+      - "8790:8000"   # family web page: http://<nas-ip>:8790
+    env_file: .env
+    environment:
+      TZ: Asia/Singapore
+      DATA_DIR: /app/data
+      VAULT_DIR: /vault
+      REPORT_AT: "daily 08:00"     # or "mon 08:00" for weekly
+      PROMO_CHECK_HOURS: "3"       # push new promos on the staples this often (0 = off)
+    volumes:
+      - ./data:/app/data
+      # Obsidian vault: movement log + memory
+      - "/volume1/<USER>/Obsidian/Supermarket Hunter:/vault"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    # One shot commands on the NAS:
+    #   docker compose exec supermarket-hunter python -m smh hello
+    #   docker compose exec supermarket-hunter python -m smh report
+    #   docker compose exec supermarket-hunter python -m smh ask eggs
