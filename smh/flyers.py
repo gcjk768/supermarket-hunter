@@ -88,32 +88,57 @@ def shengsiong_flyers(days: int = 21, now: datetime | None = None) -> list[dict]
     return out
 
 
+def read_flyer(store: str, f: dict, staples: list[str], data_dir: Path) -> list[dict]:
+    """One flyer picture {title, image, link} -> items, read by Claude (the image is downloaded once and kept)."""
+    folder = data_dir / "flyers" / _key(store, f["image"])
+    folder.mkdir(parents=True, exist_ok=True)
+    img = folder / "flyer.jpg"
+    if not img.exists():
+        img.write_bytes(_get(f["image"]))
+    prompt = (f"Read flyer.jpg in this folder (a {store} supermarket promotion flyer: '{f['title']}'). "
+                  f"List every item on it that matches one of these staples: {', '.join(staples)}. "
+              "For each give the product name as printed, the promo price as printed (e.g. '$2.50' or '2 for $5'), the offer wording, "
+              "and which staple it matches. Also add up to 5 standout deals that are not staples, with staple set to ''. "
+              "Set valid to the offer period printed on the flyer. Do not invent items you cannot read.")
+    try:
+        res = claude.ask(prompt, FLYER_SCHEMA, folder, allowed="Read", max_turns=4)
+    except claude.ClaudeFailure as ex:
+        log.warning("%s flyer %s: %s", store, f["title"], ex)
+        return []
+    return [dict(source=f"{store} flyer · {f['title'][:40]}", store=store, title=it["name"],
+                 detail=" · ".join(x for x in (it.get("price"), it.get("offer"), f"till {res.get('valid')}" if res.get("valid") else "") if x),
+                 url=f["link"], staple=it.get("staple", ""), key=_key(store, f["image"], it["name"], it.get("price")))
+            for it in res.get("items", [])]
+
+
 def shengsiong(staples: list[str], data_dir: Path) -> list[dict]:
     if not claude.available():
         log.warning("Sheng Siong flyer skipped: no CLAUDE_CODE_OAUTH_TOKEN")
         return []
-    out = []
-    for f in shengsiong_flyers()[:2]:   # the monthly flyer + the current short special at most
-        folder = data_dir / "flyers" / _key("ss", f["image"])
-        folder.mkdir(parents=True, exist_ok=True)
-        img = folder / "flyer.jpg"
-        if not img.exists():
-            img.write_bytes(_get(f["image"]))
-        prompt = (f"Read flyer.jpg in this folder (a Sheng Siong supermarket promotion flyer: '{f['title']}'). "
-                  f"List every item on it that matches one of these staples: {', '.join(staples)}. "
-                  "For each give the product name as printed, the promo price as printed (e.g. '$2.50' or '2 for $5'), the offer wording, "
-                  "and which staple it matches. Also add up to 5 standout deals that are not staples, with staple set to ''. "
-                  "Set valid to the offer period printed on the flyer. Do not invent items you cannot read.")
-        try:
-            res = claude.ask(prompt, FLYER_SCHEMA, folder, allowed="Read", max_turns=4)
-        except claude.ClaudeFailure as ex:
-            log.warning("Sheng Siong flyer %s: %s", f["title"], ex)
-            continue
-        for it in res.get("items", []):
-            out.append(dict(source=f"Sheng Siong flyer · {f['title'][:40]}", store="Sheng Siong", title=it["name"],
-                            detail=" · ".join(x for x in (it.get("price"), it.get("offer"), f"till {res.get('valid')}" if res.get("valid") else "") if x),
-                            url=f["link"], staple=it.get("staple", ""), key=_key("ss", f["image"], it["name"], it.get("price"))))
+    out = [it for f in shengsiong_flyers()[:2] for it in read_flyer("Sheng Siong", f, staples, data_dir)]   # monthly + short special
     log.info("Sheng Siong flyers: %d items", len(out))
+    return out
+
+
+# ---- Prime: no online shop; its weekly flyer is a picture on the Advertised Offers page ----
+PRIME_OFFERS = "https://www.primesupermarket.com/advertised-offers/"
+PRIME_FLYER = re.compile(r"https://www\.primesupermarket\.com/wp-content/uploads/20\d\d/\d\d/(\d{8})_ST_[^\s\"')]+?\.jpe?g")
+
+
+def prime(staples: list[str], data_dir: Path) -> list[dict]:
+    """The English (ST) edition of the current flyer, full size (the page also links resized copies "-307x1024")."""
+    if not claude.available():
+        log.warning("Prime flyer skipped: no CLAUDE_CODE_OAUTH_TOKEN")
+        return []
+    md = _get(PRIME_OFFERS).decode("utf-8", "replace")   # plain HTML holds the image addresses (robots.txt allows it)
+    found = {re.sub(r"-\d+x\d+(?=\.jpe?g$)", "", m.group(0)): m.group(1) for m in PRIME_FLYER.finditer(md)}
+    if not found:
+        log.warning("Prime flyer: no flyer image on the offers page")
+        return []
+    url, day = max(found.items(), key=lambda kv: kv[1])   # the newest date in the file name
+    f = dict(title=f"weekly offers from {day[6:]}/{day[4:6]}/{day[:4]}", image=url, link=PRIME_OFFERS)
+    out = read_flyer("Prime", f, staples, data_dir)
+    log.info("Prime flyer: %d items", len(out))
     return out
 
 
@@ -153,6 +178,7 @@ def collect(staples: list[str], data_dir: Path, sleep=time.sleep) -> dict[str, l
     """source name -> items. Every source is best effort."""
     sections = {}
     for name, fn in (("FairPrice", lambda: fairprice(staples)), ("Sheng Siong", lambda: shengsiong(staples, data_dir)),
+                     ("Prime", lambda: prime(staples, data_dir)),
                      ("Giant", lambda: giant(staples)), ("singpromos", lambda: singpromos(staples, sleep))):
         try:
             sections[name] = fn()

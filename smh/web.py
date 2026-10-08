@@ -42,10 +42,9 @@ WORDMARK = {"Cold Storage", "Sheng Siong", "Hao Mart"}   # wide logos that alrea
 WHY_NO_PRICES = {   # stores whose shelf prices the page cannot show, and why (see docs/vault/Scraping Playbook.md)
     "Sheng Siong": "its online shop sits behind an anti-bot check, which we never get around",
     "Giant": "its online shop moved to the foodpanda app",
-    "Prime": "it publishes no online prices",
-    "Hao Mart": "it publishes no online prices",
-    "RedMart": "its pages do not show prices we can read",
-    "Amazon Fresh": "its pages do not show prices we can read",
+    "Prime": "it has no online shop; its weekly flyer is read instead",
+    "Hao Mart": "its online shop lists no products, even in a real browser",
+    "Amazon Fresh": "its groceries only show to signed-in Prime members",
 }
 LOGO_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/svg+xml": "svg", "image/webp": "webp", "image/x-icon": "ico",
               "image/vnd.microsoft.icon": "ico"}
@@ -53,7 +52,7 @@ EXT_TYPES = {v: k for k, v in LOGO_TYPES.items()}
 PER_STAPLE = 10   # products shown per staple: the best-value tag + a 3x3 grid, so one category fits one screen
 HOSTS = {"fairprice.com.sg": "FairPrice", "coldstorage.com.sg": "Cold Storage", "shengsiong.com.sg": "Sheng Siong",
          "giant.sg": "Giant", "primesupermarket.com": "Prime", "haomart.com.sg": "Hao Mart", "redmart.lazada.sg": "RedMart",
-         "amazon.sg": "Amazon Fresh"}
+         "amazon.sg": "Amazon Fresh", "lazada.sg": "RedMart"}
 
 
 def esc(x) -> str:
@@ -350,8 +349,21 @@ def page(data_dir: Path) -> str:
     fresh = f"Prices checked {checked.strftime('%a %d %b')}" if checked else "No prices yet"
     if not checked or (now.date() - checked).days > 1:   # the 08:00 run missed a day: say so instead of looking current
         fresh = f'<span class="stale">⚠ {fresh} · may be old</span>'
+    daily = _last_daily(data_dir)
+    if daily and daily.date() == now.date():
+        fresh = f'<span class="ok">✓ Updated today {daily:%H:%M}</span>'
+    elif now.hour >= 10:   # the 08:00 update (with its retries) should be done by now
+        fresh = (f'<span class="stale">⚠ Not updated today yet · last update {daily:%a %d %b %H:%M}</span>' if daily
+                 else f'<span class="stale">⚠ Not updated today yet</span>')
     return TEMPLATE.format(fresh=fresh, nav=nav, panels="".join(panels), first="promo",
                            updated=esc(now.strftime("%d %b %Y, %H:%M")))
+
+
+def _last_daily(data_dir: Path) -> datetime | None:
+    try:
+        return datetime.fromisoformat(json.loads((data_dir / "last_daily.json").read_text())["at"])
+    except Exception:   # noqa: BLE001  no successful daily update yet
+        return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -441,6 +453,7 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .fresh{{color:var(--muted);white-space:nowrap}}
 .legend{{margin-left:auto;display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;font-size:.95rem}}
 .legend b{{font-weight:700;color:var(--muted);margin-right:.2rem}}
+.ok{{background:#d9f0dc;color:var(--pandan);font-weight:700;padding:.25rem .7rem;border-radius:8px}}
 .stale{{background:#f8d9d2;color:var(--chili);font-weight:700;padding:.25rem .7rem;border-radius:8px}}
 .chg{{font-size:.9rem;font-weight:700;padding:.12rem .55rem;border-radius:999px;white-space:nowrap}}
 .chg.down{{background:#d9f0dc;color:var(--pandan)}} .chg.up{{background:#f8d9d2;color:var(--chili)}}

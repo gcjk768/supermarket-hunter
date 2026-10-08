@@ -155,6 +155,7 @@ def test_relevant():
     assert scrape.relevant("Simply Finest Baby Cai Xin 300g", "choy sum")           # synonym, names no other item
     assert scrape.relevant("Blush Cocktail Truss Tomatoes 250g", "tomato")          # plural
     assert scrape.relevant("Kampong Chicken Eggs 10s", "eggs")                     # names both: kept
+    assert scrape.SKIP.search("AdSupreme Basmati 1kg") and not scrape.SKIP.search("Adzuki Beans 500g")   # sponsored, not "Ad…" words
 
 
 def test_each_store_keeps_its_latest_run(tmp_path):
@@ -177,3 +178,52 @@ def test_festive_windows():
     assert [f["name"] for f in festive.active(date(2026, 12, 26))] == ["Christmas", "Chinese New Year"]   # handover day
     assert festive.terms(date(2027, 3, 1)) == ["dates", "ketupat", "rendang paste", "kuih"]
     assert all(n in festive.ITEMS for n, _ in festive.DATES)
+
+
+def test_redmart_cards():
+    """RedMart (Lazada) search cards in the NAS browser: name above the price, sold counts and reviews are noise."""
+    md = scrape._md_line("https://www.lazada.sg/products/pdp-i301088929.html",
+                         "RedMart 15 Eggs 15 X 60G\n$4.65\n9% Off\n2.0M sold\n(40258)\nSingapore", "https://img/e.jpg")
+    r = scrape.parse_redmart(md)[0]
+    assert (r["store"], r["name"], r["price"], r["promo"], r["unit"]) == ("RedMart", "RedMart 15 Eggs 15 X 60G", 4.65, "9% Off", "/100g")
+    nophoto = scrape._md_line("https://www.lazada.sg/products/pdp-i2.html", "Naturel Canola Oil 2L\n$ 7.48\n$10.08\n26% Off", "")
+    assert [(x["price"], x["was"]) for x in scrape.parse_redmart(nophoto)] == [(7.48, 10.08)]
+    fp = scrape.parse_fairprice("[Save $0.30 $7.80 $8.10 Thai Rice 5kg](https://www.fairprice.com.sg/product/r)")
+    assert (fp[0]["price"], fp[0]["promo"]) == (7.80, "Save $0.30")   # the saving is not the price
+
+
+def test_prime_flyer_url(monkeypatch, tmp_path):
+    from smh import flyers
+    page = ('<img src="https://www.primesupermarket.com/wp-content/uploads/2026/10/20261002_ST_JP_1C_Path-307x1024.jpg">'
+            '<img src="https://www.primesupermarket.com/wp-content/uploads/2026/09/20260925_ST_JP_1C_Path.jpg">'
+            '<img src="https://www.primesupermarket.com/wp-content/uploads/2026/10/20261002_ZB_JP_1C_Path.jpg">')
+    monkeypatch.setattr(flyers, "_get", lambda url, timeout=90: page.encode())
+    monkeypatch.setattr(flyers.claude, "available", lambda: True)
+    seen = {}
+    monkeypatch.setattr(flyers, "read_flyer", lambda store, f, staples, d: seen.update(f) or [])
+    flyers.prime(["rice"], tmp_path)
+    assert seen["image"] == "https://www.primesupermarket.com/wp-content/uploads/2026/10/20261002_ST_JP_1C_Path.jpg"   # newest, English, full size
+
+
+def test_daily_update_catch_up_and_retry(monkeypatch, tmp_path):
+    from datetime import timedelta
+    tz = serve.vault.TZ
+    t = lambda d, h, m=0: datetime(2026, 10, d, h, m, tzinfo=tz)
+    assert serve.due("daily 08:00", t(9, 7), t(8, 8, 3)) is False        # yesterday's 08:03 run covers until today 08:00
+    assert serve.due("daily 08:00", t(9, 9), t(8, 8, 3)) is True         # 09:00 today, no run since 08:00 -> catch up now
+    assert serve.due("daily 08:00", t(9, 9), t(9, 8, 2)) is False
+    assert serve.due("daily 08:00", t(9, 9), None) is True               # never ran
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    app, calls = serve.App(), []
+
+    def flaky(full=True):            # first try finds nothing (internet down), second works
+        calls.append(full)
+        if len(calls) == 2:
+            serve.mark_daily(tmp_path, 14, 14)
+    monkeypatch.setattr(app, "refresh", flaky)
+    monkeypatch.setattr(serve, "_wait", lambda app_, s: (_ for _ in ()).throw(StopIteration) if s > 60 else None)
+    try:
+        serve.scheduler(app, "daily 08:00", tries=3, retry_s=1)
+    except StopIteration:            # stops at the long wait for tomorrow's run
+        pass
+    assert calls == [True, True] and serve.last_daily(tmp_path) is not None

@@ -3,6 +3,7 @@ Env: REPORT_AT ("daily 08:00" SGT: full refresh, every store + flyers), PROMO_CH
 DATA_DIR, VAULT_DIR, WEB_PORT."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -20,8 +21,13 @@ DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 class App:
     def __init__(self):
         self.store = Store(Path(os.environ.get("DATA_DIR", "data")))
+        self.lock = threading.Lock()   # the daily update and the 3-hourly refresh take turns, never overlap
 
     def refresh(self, full: bool = True, sleep=time.sleep) -> dict[str, int]:
+        with self.lock:
+            return self._refresh(full, sleep)
+
+    def _refresh(self, full: bool = True, sleep=time.sleep) -> dict[str, int]:
         """Search every staple and save the rows. full = also the daily-only stores (FairPrice via the NAS browser) and the
         flyer sources. New promos near the best value are marked in `alerts`, so the page can show 🆕 on the day they appear."""
         cfg, today = self.store.config(), datetime.now(vault.TZ).date()
@@ -76,7 +82,10 @@ class App:
             except Exception:   # noqa: BLE001  prices are saved already; a broken flyer source must not undo that
                 log.exception("flyers failed")
                 vault.log_event("❌", "flyers failed", "see container log")
-        vault.log_event("✅", "refresh done", f"{sum(1 for n in counts.values() if n)}/{len(counts)} staples with prices")
+        ok = sum(1 for n in counts.values() if n)
+        vault.log_event("✅", "refresh done", f"{ok}/{len(counts)} staples with prices")
+        if full and ok * 2 >= len(counts):   # at least half the items found: today's daily update counts as done
+            mark_daily(self.store.cfg_path.parent, ok, len(counts))
         vault.write_home()
         return counts
 
@@ -94,22 +103,58 @@ def next_run(spec: str, now: datetime) -> datetime:
     return target
 
 
+def mark_daily(data_dir: Path, ok: int, total: int) -> None:
+    (data_dir / "last_daily.json").write_text(json.dumps({"at": datetime.now(vault.TZ).isoformat(), "ok": ok, "total": total}))
+
+
+def last_daily(data_dir: Path) -> datetime | None:
+    """When the last successful daily (full) update finished, or None."""
+    try:
+        return datetime.fromisoformat(json.loads((data_dir / "last_daily.json").read_text())["at"])
+    except Exception:   # noqa: BLE001
+        return None
+
+
+def due(spec: str, now: datetime, last: datetime | None) -> bool:
+    """Has the most recent scheduled update time passed without a successful update since? (catch-up after a restart)"""
+    prev = next_run(spec, now) - (timedelta(days=1) if spec.lower().startswith("daily") else timedelta(days=7))
+    return last is None or last < prev
+
+
 def heartbeat(data_dir: Path) -> None:
     (data_dir / "heartbeat").write_text(str(time.time()))
 
 
-def scheduler(app: App, spec: str) -> None:
+def _wait(app: App, seconds: float) -> None:
+    end = time.time() + seconds
+    while (left := end - time.time()) > 0:
+        heartbeat(app.store.cfg_path.parent)
+        time.sleep(min(left, 60))
+
+
+def scheduler(app: App, spec: str, tries: int = 3, retry_s: float = 1800) -> None:
+    """The daily update must happen: it runs at REPORT_AT, catches up straight away if the NAS or container was down at
+    that time, and retries a failed or empty run up to `tries` times, `retry_s` apart. Every outcome goes to the vault."""
+    data = app.store.cfg_path.parent
     while True:
+        now = datetime.now(vault.TZ)
+        if due(spec, now, last_daily(data)):
+            if now - (next_run(spec, now) - timedelta(days=1)) > timedelta(minutes=5):
+                vault.log_event("⏰", "daily update catch-up", "the scheduled run was missed (NAS or container down); running now")
+            for attempt in range(1, tries + 1):
+                try:
+                    app.refresh(full=True)
+                except Exception:   # noqa: BLE001
+                    log.exception("daily update failed")
+                if not due(spec, datetime.now(vault.TZ), last_daily(data)):
+                    vault.log_event("✅", "daily update done", f"attempt {attempt}")
+                    break
+                vault.log_event("❌", "daily update failed", f"attempt {attempt}/{tries}" + (f", retrying in {retry_s / 60:.0f} min" if attempt < tries else ", giving up until the next scheduled run"))
+                if attempt < tries:
+                    _wait(app, retry_s)
         nxt = next_run(spec, datetime.now(vault.TZ))
-        log.info("next full refresh at %s", nxt)
-        while (left := (nxt - datetime.now(vault.TZ)).total_seconds()) > 0:
-            heartbeat(app.store.cfg_path.parent)
-            time.sleep(min(left, 60))
-        try:
-            app.refresh(full=True)
-        except Exception:   # noqa: BLE001
-            log.exception("refresh failed")
-            vault.log_event("❌", "refresh failed", "see container log")
+        log.info("next daily update at %s", nxt)
+        _wait(app, (nxt - datetime.now(vault.TZ)).total_seconds())
 
 
 def price_watcher(app: App, hours: float) -> None:

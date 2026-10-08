@@ -19,7 +19,7 @@ One Docker container on a home NAS runs `python -m smh serve`:
 
 | Thread | When | Does |
 |---|---|---|
-| Full refresh | daily 08:00 SGT | every staple at every store we can read, plus the flyer sources |
+| Daily update | 08:00 SGT | every item at every store we can read, plus the flyer sources. Must happen: it catches up at start-up if 08:00 was missed (NAS or container down), retries a failed run 3× 30 min apart, and the page header shows "✓ Updated today HH:MM" (red if not) |
 | Quick refresh | every 3 h | Cold Storage prices again, so new promotions reach the page within hours |
 | **Web server** | always | the family web page on port 8790 |
 
@@ -60,8 +60,13 @@ visits, errors), `Items/` (one note per staple), `Stores/` (one note per superma
 - **Cold Storage** search through Jina (robots.txt allows it). **FairPrice** search through the NAS browser, once a day,
   one page at a time (its robots.txt disallows `/search` for crawlers; the owner's rule allows the NAS browser for such
   pages at personal, low volume). Its `/promotions` page is read through Jina.
+- **RedMart** (on Lazada) search through the NAS browser, once a day: its search cards keep the price beside the product
+  link, so the browser reads the whole card.
+- **Prime** has no online shop: its weekly flyer picture (Advertised Offers page) is read by Claude, once a day.
 - **Sheng Siong**'s shop is behind an anti-bot check, and since 2026-10-09 its flyer feed answers the NAS with the same check:
-  nothing is read, never bypassed. **Giant** has no online shop any more (foodpanda app only): its promotion page only. **Prime**, **Hao Mart**, **RedMart**, **Amazon Fresh**: no prices we can read.
+  nothing is read, never bypassed. **Giant** has no online shop any more (foodpanda app only): its promotion page only.
+- **Hao Mart**'s online shop lists no products, even in a real browser. **Amazon Fresh** groceries only show to signed-in
+  Prime members, so they are not read.
 - No stealth plugins, proxies, rotating IPs or captcha solvers. A few seconds between pages.
 
 ## Run

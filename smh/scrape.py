@@ -26,34 +26,60 @@ log = logging.getLogger(__name__)
 JINA = "https://r.jina.ai/"
 PRICE = re.compile(r"\$\d+(?:\.\d+)?")
 UNIT = re.compile(r"(?:(\d+)\s*[xX]\s*)?(\d+(?:\.\d+)?)\s*(kg|g|l|ml|s)\b", re.I)
-SKIP = re.compile(r"^Ad\b|\bseeds?\b|out of stock", re.I)   # sponsored rows start with "Ad "
+SKIP = re.compile(r"^Ad\b|^(?-i:Ad(?=[A-Z]))|\bseeds?\b|out of stock", re.I)   # sponsored rows: "Ad …" (browser: "AdSupreme…")
 FP_LINE = re.compile(r"^\[(.*)\]\((https://www\.fairprice\.com\.sg/product/[^)]+)\)", re.M)
 CS_LINE = re.compile(r"^\[(?:(\d+)% off )?(\$\d+(?:\.\d+)?) (?:(\$\d+(?:\.\d+)?) )?([^\]]+)\]\((https://coldstorage\.com\.sg/product/[^)]+)\)", re.M | re.I)   # the browser says "5% OFF"
+RM_LINE = re.compile(r"^\[(.*)\]\((https://www\.lazada\.sg/products/[^)]+)\)", re.M)
 CS_IMG = re.compile(r"^\[!\[[^\]]*\]\((https?://[^)\s]+)\)\]\((https://coldstorage\.com\.sg/product/[^)]+)\)", re.M)   # photo line above each product
 STORES = {   # name -> (search url, product-line regex, route); tools/ has the research for the other stores
     "Cold Storage": ("https://coldstorage.com.sg/search?q={}", CS_LINE, "jina"),
     "FairPrice": ("https://www.fairprice.com.sg/search?query={}", FP_LINE, "browser"),
+    # RedMart lives on Lazada; service=RM keeps RedMart's own groceries. Its search cards keep the price outside the link: "card" mode
+    "RedMart": ("https://www.lazada.sg/catalog/?q={}&service=RM", RM_LINE, "browser-card"),
 }
-DAILY_ONLY = {"FairPrice"}   # browser-only stores: searched in the 08:00 full refresh, not every 3 hours
+DAILY_ONLY = {"FairPrice", "RedMart"}   # browser-only stores: searched in the 08:00 full refresh, not every 3 hours
 PW_WS = os.environ.get("PLAYWRIGHT_WS_URL", "ws://playwright:3000/")
-CHALLENGE = re.compile(r"incapsula|request unsuccessful|captcha|verify you are human|access denied|robot check|unusual traffic", re.I)
+CHALLENGE = re.compile(r"incapsula|request unsuccessful|captcha|verify you are human|access denied|robot check|unusual traffic|"
+                       r"slide to verify|sliding verification|/punish", re.I)   # Lazada's slider check counts as a challenge
+PROMO = re.compile(r"(?i)^(save \$|\d+% off|any \d|buy \d|\d+ for \$|spend \$|up to)")
+NOISE = re.compile(r"(?i)^(add to cart|\d\.\d|\(\d+(\.\d+)?k?\)|[\d.]+[km]? sold|singapore)$")   # rating, review count, "2.0M sold"
 
 
 def _md_line(href: str, text: str, img: str) -> str:
-    """One product link from the browser -> the Jina Markdown shape the parsers read.
-    "Save $1.46\n$10.49\n$11.95\nEgg White\n500 ML\nAdd to cart" -> [Save $1.46 ![Image](img) $10.49 $11.95 Egg White 500 ML](href)"""
-    lines = [x.strip() for x in text.splitlines() if x.strip() and x.strip().lower() != "add to cart"
-             and not re.fullmatch(r"\d\.\d|\(\d+\)", x.strip())]   # star rating "2.8" "(4)"
-    if not lines:
+    """One product card from the browser -> the Jina Markdown shape the parsers read: [promo ![Image](img) $price $was name](href).
+    Lines are sorted by what they are, not where they sit: FairPrice puts the promo above the price, RedMart the name above.
+    "Save $1.46\n$10.49\n$11.95\nEgg White\n500 ML" -> [Save $1.46 ![Image](img) $10.49 $11.95 Egg White 500 ML](href)
+    "RedMart 15 Eggs 15 X 60G\n$4.65\n9% Off\n2.0M sold" -> [9% Off ![Image](img) $4.65 RedMart 15 Eggs 15 X 60G](href)"""
+    lines = [x.strip() for x in text.splitlines() if x.strip() and not NOISE.fullmatch(x.strip())]
+    prices = [x for x in lines if re.fullmatch(r"\$\s?\d+(?:\.\d+)?", x)]
+    if not prices:
         return f"[![Image]({img})]({href})" if img else ""
-    k = next((n for n, x in enumerate(lines) if re.fullmatch(r"\$\d+(?:\.\d+)?", x)), 0)   # promo text sits above the price
-    promo, rest = " ".join(lines[:k]), " ".join(lines[k:])
-    body = f"{promo} ![Image]({img}) {rest}" if img else f"{promo} {rest}"
+    promo = " ".join(x for x in lines if PROMO.match(x))
+    name = " ".join(x for x in lines if x not in prices and not PROMO.match(x))
+    price_txt = " ".join(x.replace(" ", "") for x in prices)
+    body = f"{promo} ![Image]({img}) {price_txt} {name}" if img else f"{promo} {price_txt} {name}"
     return f"[{body.strip()}]({href})"
 
 
-def browser_md(url: str) -> str:
+LINKS = "a[href*='/product/'], a[href*='/products/']"
+LINKS_JS = """(els, cards) => {
+  const imgs = {};
+  els.forEach(a => { const i = a.querySelector('img'), h = a.href.split('?')[0]; if (i && i.src && !imgs[h]) imgs[h] = i.src; });
+  return els.map(a => {
+    const h = a.href.split('?')[0]; let t = a.innerText;
+    if (cards && t.trim() && !t.includes('$')) {   // the price sits beside the link: read the whole product card
+      let el = a; for (let k = 0; k < 6 && el && !el.innerText.includes('$'); k++) el = el.parentElement;
+      if (el) t = el.innerText;
+    }
+    const own = (a.querySelector('img') || {}).src || '';
+    return [h, t, own || (cards && t.trim() ? imgs[h] || '' : '')];
+  });
+}"""
+
+
+def browser_md(url: str, cards: bool = False) -> str:
     """The page through the shared Playwright server on the NAS (Docker network scrape-net), as Jina-style Markdown.
+    cards=True: take each product's whole card (price outside the link) and its photo from the photo link.
     Default Chromium, no stealth. '' on a challenge page, a 403/429 or any error."""
     try:
         from playwright.sync_api import sync_playwright
@@ -71,7 +97,7 @@ def browser_md(url: str) -> str:
                     vault.log_event("⛔", "blocked in the browser", f"HTTP {resp.status} · {url}")
                     return ""
                 try:
-                    page.wait_for_selector("a[href*='/product/']", timeout=20000)
+                    page.wait_for_selector(LINKS, timeout=20000)
                 except Exception:   # noqa: BLE001  no products: decided below
                     pass
                 m = CHALLENGE.search(page.title() + page.inner_text("body")[:3000] + page.content()[:5000])
@@ -79,8 +105,7 @@ def browser_md(url: str) -> str:
                     log.warning("%s: challenge page (%s), blocked, not worked around", url, m.group(0))
                     vault.log_event("⛔", "challenge page, not worked around", f"{m.group(0)} · {url}")
                     return ""
-                links = page.eval_on_selector_all(
-                    "a[href*='/product/']", "els => els.map(a => [a.href, a.innerText, (a.querySelector('img') || {}).src || ''])")
+                links = page.eval_on_selector_all(LINKS, LINKS_JS, cards)
             finally:
                 browser.close()
     except Exception as ex:   # noqa: BLE001
@@ -107,12 +132,13 @@ def browser_file(url: str) -> tuple[bytes, str]:
 
 
 def fetch(url: str, line: re.Pattern, sleep=time.sleep, route: str = "jina") -> str:
-    """Jina first; when Jina cannot get the page (error, block, empty render), the NAS browser. route='browser' skips Jina."""
+    """Jina first; when Jina cannot get the page (error, block, empty render), the NAS browser.
+    route='browser' skips Jina; 'browser-card' also reads whole product cards (RedMart)."""
     md = _jina(url, line, sleep) if route == "jina" else ""
     if not md:
         if route == "jina":
             vault.log_event("↪️", "Jina could not read the page, trying the NAS browser", url)
-        md = browser_md(url)
+        md = browser_md(url, cards=route == "browser-card")
         if md and not line.search(md):
             log.warning("%s: browser found no products", url)
             md = ""
@@ -166,11 +192,17 @@ def _row(store: str, name: str, price: float, was: float | None, promo: str, url
                 image=image if image.startswith("https://") else "")
 
 
-def parse_fairprice(md: str) -> list[dict]:
+def parse_fairprice(md: str, line: re.Pattern = FP_LINE, store: str = "FairPrice") -> list[dict]:
+    """[promo ![img](..) $price [$was] name](url) lines: FairPrice (Jina or browser) and RedMart (browser) share this shape."""
     rows = []
-    for body, url in FP_LINE.findall(md):
+    for body, url in line.findall(md):
         img = re.search(r"!\[.*?\]\((https://[^)\s]+)\)", body)
-        promo, _, rest = re.sub(r"!\[.*?\]\(.*?\)", "@@", body).partition("@@")   # promo | img | prices + name
+        marked = re.sub(r"!\[.*?\]\(.*?\)", "@@", body)
+        if "@@" not in marked:   # no photo: the promo is whatever comes before the first price
+            # the first price that is not inside a promo phrase ("Save $0.30", "Spend $30", "Any 2 at $5", "2 for $5")
+            first = re.search(r"(?<![Ss]ave )(?<![Ss]pend )(?<![Aa]t )(?<!for )\$\d+(?:\.\d+)?", marked)
+            marked = marked[:first.start()] + "@@" + marked[first.start():] if first else marked
+        promo, _, rest = marked.partition("@@")   # promo | img | prices + name
         rest = re.sub(r"\+\$\d+(?:\.\d+)?\s*deposit", "", rest)                       # BCRS bottle deposit is not price
         prices = PRICE.findall(rest)
         if not prices:
@@ -178,7 +210,7 @@ def parse_fairprice(md: str) -> list[dict]:
         name = re.sub(r"^(\s*\$\d+(?:\.\d+)?)+", "", rest).replace("@@", "").strip().replace("•", " | ")
         name = re.sub(r"\s*Add to cart.*$", "", name)   # promotions page appends the button text
         name = re.sub(r"\s+\d\.\d\(\d+\)?$", "", name)   # trailing "4.6(161)" rating
-        r = _row("FairPrice", name, float(prices[0][1:]), float(prices[1][1:]) if len(prices) > 1 else None,
+        r = _row(store, name, float(prices[0][1:]), float(prices[1][1:]) if len(prices) > 1 else None,
                  re.sub(r"\*", "", promo), url, img[1] if img else "")
         if r:
             rows.append(r)
@@ -195,7 +227,11 @@ def parse_coldstorage(md: str) -> list[dict]:
     return rows
 
 
-PARSERS = {"FairPrice": parse_fairprice, "Cold Storage": parse_coldstorage}
+def parse_redmart(md: str) -> list[dict]:
+    return parse_fairprice(md, RM_LINE, "RedMart")
+
+
+PARSERS = {"FairPrice": parse_fairprice, "Cold Storage": parse_coldstorage, "RedMart": parse_redmart}
 
 
 def parse(md: str) -> list[dict]:
