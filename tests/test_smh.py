@@ -21,6 +21,8 @@ def test_per_unit():
     assert scrape.per_unit("Something", 5) == (None, "")
     u, lbl = scrape.per_unit("Farm Choice Eggs 12s 660g", 3.30)
     assert (round(u, 2), lbl) == (0.5, "/100g")   # weight beats count
+    assert round(scrape.per_unit("Seng Choon 60 G Farm Fresh Eggs 10s", 3.88)[0], 2) == 0.65   # 60 G is one egg: x10
+    assert round(scrape.per_unit("Chew Eggs 55g (10 per pack)", 4.0)[0], 2) == 0.73
 
 
 def test_parse():

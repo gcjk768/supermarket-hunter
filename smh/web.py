@@ -253,7 +253,7 @@ def most_bought_panel(items: list[str], datas: dict, cfg: dict, steps: str) -> s
                 seen.add(r["url"])
                 best.append((r["sold"], s_, r))
     best.sort(key=lambda t: -t[0])
-    cells = [cell(r, f"🔥 {sold_text(n)} sold · {s_}", cfg["brands"].get(s_, []), cards.EMOJI.get(s_, "🛒")) for n, s_, r in best[:10]]
+    cells = [cell(r, f"🔥 {sold_text(n)} sold", cfg["brands"].get(s_, []), cards.EMOJI.get(s_, "🛒")) for n, s_, r in best[:10]]
     body = (f'<div class="shelf shelf-store"><div class="grid grid-store">{"".join(cells)}</div></div>' if cells
             else '<p class="empty">No sales counts yet: RedMart is read every 3 hours in the daytime.</p>')
     return panel("top", "🔥", "Most bought", "最畅销", "RedMart's best sellers among your items · how many each has sold on RedMart",

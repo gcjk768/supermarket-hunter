@@ -209,6 +209,11 @@ def per_unit(name: str, price: float) -> tuple[float | None, str]:
     m = next((f for f in found if f[3].lower() != "s"), found[0])
     n, q, u = int(m[1] or 1), float(m[2]), m[3].lower()
     q = {"kg": q * 1000, "l": q * 1000}.get(u, q) * n
+    if u == "g" and n == 1 and q <= 80:   # "60 G … Eggs 10s": a weight this small is one piece, the pack has `count` of them
+        count = next((int(float(f[2])) for f in found if f[3].lower() == "s"), None)
+        if count is None and (c := re.search(r"(\d+)\s*(?:per pack|pcs|pieces)\b", name, re.I)):
+            count = int(c[1])
+        q *= count or 1
     if q <= 0:
         return None, ""
     if u == "s":
