@@ -4,7 +4,8 @@ Family grocery price web page for Singapore. Every morning (08:00) it finds the 
 family cooks with: price per 100g / 100ml / piece, so a 10kg bag and a 5kg bag compare fairly, with trusted brands first.
 It shows everything on a **web page on the home network**, with product photos, the supermarkets' own logos and one tap
 through to the shop's product page. Nothing is sent anywhere: the page is the only output, and an Obsidian vault on the
-NAS records every movement.
+NAS records every movement. Problems (page down, no daily update by 10:00) turn the container unhealthy, which the NAS's
+monitoring app (NAS Doctor) reports.
 
 ![Today's Best Buys web page](docs/web-page.png)
 
@@ -20,7 +21,7 @@ One Docker container on a home NAS runs `python -m smh serve`:
 | Thread | When | Does |
 |---|---|---|
 | Daily update | 08:00 SGT | every item at every store we can read, plus the flyer sources. Must happen: it catches up at start-up if 08:00 was missed (NAS or container down), retries a failed run 3× 30 min apart, and the page header shows "✓ Updated today HH:MM" (red if not) |
-| Quick refresh | every 3 h | Cold Storage prices again, so new promotions reach the page within hours |
+| Regular checks | hourly · every 3 h | Cold Storage every hour; every store and the flyers every 3 h from 07:00 to 22:00, so anything new reaches the page without waiting |
 | **Web server** | always | the family web page on port 8790 |
 
 **The data path**

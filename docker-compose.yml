@@ -21,7 +21,8 @@ services:
       DATA_DIR: /app/data
       VAULT_DIR: /vault
       REPORT_AT: "daily 08:00"     # full refresh (every store + flyers)
-      PROMO_CHECK_HOURS: "3"       # quick price refresh between the daily runs (0 = off)
+      PROMO_CHECK_HOURS: "1"       # check Cold Storage for anything new every hour (0 = off)
+      FULL_EVERY_HOURS: "3"        # every store + flyers every 3 h, 07:00-22:00 (the daily update at 08:00 is one of them)
       PLAYWRIGHT_WS_URL: ws://playwright:3000/
     volumes:
       - ./data:/app/data

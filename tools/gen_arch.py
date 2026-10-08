@@ -11,7 +11,6 @@ ICON = {
     "globe": "sketch=0;outlineConnect=0;fillColor=#232F3D;strokeColor=none;dashed=0;html=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.globe",
     "claude": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "assets/font-awesome/1/Claude_brand.svg",
     "docker": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "assets/azure/1/Docker.svg",
-    "telegram": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "icon-cache1/Brands_Pack-2317/telegram-1286.svg",
     "sql": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "assets/databases/1/SQL.svg",
     "obsidian": "shape=image;html=1;imageAspect=0;aspect=fixed;image=" + I + "assets/font-awesome/1/Obsidian_brand.svg",
     "laptop": "image;html=1;image=https://app.diagrams.net/img/lib/clip_art/computers/Laptop_128x128.png",
@@ -77,7 +76,7 @@ v("g_nas", "🏠 Home NAS · UGREEN DXP4800 Pro", 450, 70, 650, 790, GROUP + "fi
 v("g_ctr", "", 470, 160, 610, 540, "rounded=1;whiteSpace=wrap;html=1;arcSize=3;fillColor=#FFF8E6;strokeColor=#E6A72A;strokeWidth=2;dashed=1")
 icon("docker", "docker", "<b>Docker container supermarket-hunter</b> · python -m smh serve", 480, 112, 40, pos=right(420))
 box("sched", "⏰ <b>Full refresh</b><br>daily 08:00 · all stores + flyers", 490, 185, 175, 60, "#FFFFFF", "#E6A72A")
-box("watch", "🔁 <b>Quick refresh</b><br>prices every 3 hours", 690, 185, 175, 60, "#FFFFFF", "#E6A72A")
+box("watch", "🔁 <b>Regular checks</b><br>hourly · all stores every 3 h", 690, 185, 175, 60, "#FFFFFF", "#E6A72A")
 box("pw", "🎭 <b>Playwright server</b><br>shared container · scrape-net", 890, 185, 175, 60, "#F3ECFA", "#6B3FA0", "dashed=1;")
 box("flyers", "<b>flyers.py</b><br>flyer &amp; promo-page items", 490, 290, 175, 66, "#DAE8FC", "#1D4FA3")
 box("scrape", "<b>scrape.py</b><br>products · price per 100g · photo", 690, 290, 175, 66, "#DAE8FC", "#1D4FA3")

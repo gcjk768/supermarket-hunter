@@ -1,5 +1,6 @@
 """Background jobs that keep the family web page fresh. Nothing is sent anywhere: the web page is the only output.
-Env: REPORT_AT ("daily 08:00" SGT: full refresh, every store + flyers), PROMO_CHECK_HOURS (quick price refresh, 0 = off),
+Env: REPORT_AT ("daily 08:00" SGT: the daily update, every store + flyers, must happen), PROMO_CHECK_HOURS (how often to
+check for something new, default 1 h), FULL_EVERY_HOURS (every store + flyers this often between 07:00 and 22:00, default 3),
 DATA_DIR, VAULT_DIR, WEB_PORT."""
 from __future__ import annotations
 
@@ -21,7 +22,8 @@ DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 class App:
     def __init__(self):
         self.store = Store(Path(os.environ.get("DATA_DIR", "data")))
-        self.lock = threading.Lock()   # the daily update and the 3-hourly refresh take turns, never overlap
+        self.lock = threading.Lock()   # the daily update and the regular checks take turns, never overlap
+        self.last_full = last_daily(self.store.cfg_path.parent)   # when every store + flyers were last read
 
     def refresh(self, full: bool = True, sleep=time.sleep) -> dict[str, int]:
         with self.lock:
@@ -86,6 +88,8 @@ class App:
         vault.log_event("✅", "refresh done", f"{ok}/{len(counts)} staples with prices")
         if full and ok * 2 >= len(counts):   # at least half the items found: today's daily update counts as done
             mark_daily(self.store.cfg_path.parent, ok, len(counts))
+        if full:
+            self.last_full = datetime.now(vault.TZ)
         vault.write_home()
         return counts
 
@@ -121,6 +125,21 @@ def due(spec: str, now: datetime, last: datetime | None) -> bool:
     return last is None or last < prev
 
 
+def health_problem(data_dir: Path, port: int, now: datetime | None = None) -> str:
+    """'' when all is well; otherwise the problem in one line (the family page is down, or no daily update by 10:00)."""
+    import urllib.request
+    try:
+        if urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=15).status != 200:
+            return "family web page not answering"
+    except Exception as ex:   # noqa: BLE001
+        return f"family web page not answering: {type(ex).__name__}"
+    now = now or datetime.now(vault.TZ)
+    last = last_daily(data_dir)
+    if now.hour >= 10 and (last is None or last.date() < now.date()):
+        return f"no daily price update today (last: {last:%a %d %b %H:%M})" if last else "no daily price update yet"
+    return ""
+
+
 def _wait(app: App, seconds: float) -> None:
     end = time.time() + seconds
     while (left := end - time.time()) > 0:
@@ -152,15 +171,21 @@ def scheduler(app: App, spec: str, tries: int = 3, retry_s: float = 1800) -> Non
         _wait(app, (nxt - datetime.now(vault.TZ)).total_seconds())
 
 
-def price_watcher(app: App, hours: float) -> None:
-    """Quick refresh between the daily runs, so new promos reach the page within a few hours."""
+def full_due(now: datetime, last_full: datetime | None, every_h: float) -> bool:
+    """Every store + flyers again? Daytime only (07:00-22:00), at most every `every_h` hours."""
+    return every_h > 0 and 7 <= now.hour <= 22 and (last_full is None or now - last_full >= timedelta(hours=every_h))
+
+
+def price_watcher(app: App, hours: float, full_every: float = 3) -> None:
+    """Regular checks so anything new reaches the page without waiting for tomorrow: Cold Storage every `hours`
+    (cheap, through Jina); every store and the flyers every `full_every` hours in the daytime (the NAS browser stays gentle)."""
     time.sleep(120)   # let the container settle / avoid clashing with a refresh at start-up
     while True:
         try:
-            app.refresh(full=False)
+            app.refresh(full=full_due(datetime.now(vault.TZ), app.last_full, full_every))
         except Exception:   # noqa: BLE001
-            log.exception("price refresh failed")
-            vault.log_event("❌", "price refresh failed", "see container log")
+            log.exception("regular check failed")
+            vault.log_event("❌", "regular check failed", "see container log")
         time.sleep(hours * 3600)
 
 
@@ -170,9 +195,10 @@ def main() -> None:
         web.start(app.store.cfg_path.parent, port)
     spec = os.environ.get("REPORT_AT", "daily 08:00")
     threading.Thread(target=scheduler, args=(app, spec), daemon=True).start()
-    hours = float(os.environ.get("PROMO_CHECK_HOURS", "3"))
+    hours = float(os.environ.get("PROMO_CHECK_HOURS", "1"))
+    full_every = float(os.environ.get("FULL_EVERY_HOURS", "3"))
     if hours > 0:
-        threading.Thread(target=price_watcher, args=(app, hours), daemon=True).start()
+        threading.Thread(target=price_watcher, args=(app, hours, full_every), daemon=True).start()
     vault.log_event("🚀", "supermarket hunter started", f"full refresh {spec} SGT, prices every {hours:g} h, web :{port}")
     vault.write_home()
     threading.Event().wait()

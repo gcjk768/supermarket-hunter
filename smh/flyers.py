@@ -4,6 +4,7 @@ Each source returns a list of dicts: {source, title, detail, url, price?, store,
 from __future__ import annotations
 
 import hashlib
+import json
 import html
 import logging
 import re
@@ -95,6 +96,9 @@ def read_flyer(store: str, f: dict, staples: list[str], data_dir: Path) -> list[
     img = folder / "flyer.jpg"
     if not img.exists():
         img.write_bytes(_get(f["image"]))
+    done = folder / "items.json"
+    if done.exists():   # read before: the same picture never costs a second Claude call
+        return json.loads(done.read_text(encoding="utf-8"))
     prompt = (f"Read flyer.jpg in this folder (a {store} supermarket promotion flyer: '{f['title']}'). "
                   f"List every item on it that matches one of these staples: {', '.join(staples)}. "
               "For each give the product name as printed, the promo price as printed (e.g. '$2.50' or '2 for $5'), the offer wording, "
@@ -105,10 +109,12 @@ def read_flyer(store: str, f: dict, staples: list[str], data_dir: Path) -> list[
     except claude.ClaudeFailure as ex:
         log.warning("%s flyer %s: %s", store, f["title"], ex)
         return []
-    return [dict(source=f"{store} flyer · {f['title'][:40]}", store=store, title=it["name"],
-                 detail=" · ".join(x for x in (it.get("price"), it.get("offer"), f"till {res.get('valid')}" if res.get("valid") else "") if x),
-                 url=f["link"], staple=it.get("staple", ""), key=_key(store, f["image"], it["name"], it.get("price")))
-            for it in res.get("items", [])]
+    items = [dict(source=f"{store} flyer · {f['title'][:40]}", store=store, title=it["name"],
+                  detail=" · ".join(x for x in (it.get("price"), it.get("offer"), f"till {res.get('valid')}" if res.get("valid") else "") if x),
+                  url=f["link"], staple=it.get("staple", ""), key=_key(store, f["image"], it["name"], it.get("price")))
+             for it in res.get("items", [])]
+    done.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    return items
 
 
 def shengsiong(staples: list[str], data_dir: Path) -> list[dict]:

@@ -227,3 +227,21 @@ def test_daily_update_catch_up_and_retry(monkeypatch, tmp_path):
     except StopIteration:            # stops at the long wait for tomorrow's run
         pass
     assert calls == [True, True] and serve.last_daily(tmp_path) is not None
+
+
+def test_regular_checks_and_health(monkeypatch, tmp_path):
+    tz = serve.vault.TZ
+    t = lambda h, m=0: datetime(2026, 10, 9, h, m, tzinfo=tz)
+    assert serve.full_due(t(11), t(8), 3) and not serve.full_due(t(10), t(8), 3)    # every 3 h ...
+    assert not serve.full_due(t(23), t(8), 3) and not serve.full_due(t(6), None, 3)  # ... daytime only
+    import urllib.request
+
+    class Ok:
+        status = 200
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=15: Ok())
+    assert serve.health_problem(tmp_path, 8000, t(9)) == ""                         # before 10:00: not yet a problem
+    assert "no daily price update" in serve.health_problem(tmp_path, 8000, t(11))   # NAS Doctor would alert
+    serve.mark_daily(tmp_path, 18, 18)
+    assert serve.health_problem(tmp_path, 8000, datetime.now(tz).replace(hour=11)) == ""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=15: (_ for _ in ()).throw(OSError("down")))
+    assert "web page not answering" in serve.health_problem(tmp_path, 8000, t(9))

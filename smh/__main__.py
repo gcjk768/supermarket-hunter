@@ -17,11 +17,10 @@ def main(argv: list[str]) -> int:
     elif cmd == "ask":   # quick look from the shell: cheapest per unit first
         for r in scrape.search(" ".join(argv[1:]))[:10]:
             print(f"{cards.money(r['price']):>8}  {cards.unit(r):>14}  {r['store']:<12} {r['name'][:60]}  {r['promo']}")
-    elif cmd == "health":   # healthy = the family page answers (whether today's update ran is shown on the page itself)
-        import urllib.request
-        try:
-            return 0 if urllib.request.urlopen(f"http://127.0.0.1:{os.environ.get('WEB_PORT', '8000')}/", timeout=15).status == 200 else 1
-        except Exception:   # noqa: BLE001
+    elif cmd == "health":   # unhealthy = a real problem; NAS Doctor watches container health and alerts the owner
+        problem = serve.health_problem(serve.Path(os.environ.get("DATA_DIR", "data")), int(os.environ.get("WEB_PORT", "8000")))
+        if problem:
+            print(problem)   # shows in `docker inspect` health log, which NAS Doctor reads as the reason
             return 1
     else:
         print(__doc__)
