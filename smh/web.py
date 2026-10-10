@@ -47,6 +47,7 @@ WHY_NO_PRICES = {   # stores whose shelf prices the page cannot show, and why (s
 LOGO_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/svg+xml": "svg", "image/webp": "webp", "image/x-icon": "ico",
               "image/vnd.microsoft.icon": "ico"}
 EXT_TYPES = {v: k for k, v in LOGO_TYPES.items()}
+SHOW = 3   # cards shown before "Show more": a few clear choices, not a wall (older users overload on long lists)
 PER_STAPLE = 10   # products shown per staple: the best-value tag + a 3x3 grid, so one category fits one screen
 HOSTS = {"fairprice.com.sg": "FairPrice", "coldstorage.com.sg": "Cold Storage", "shengsiong.com.sg": "Sheng Siong",
          "giant.sg": "Giant", "primesupermarket.com": "Prime", "haomart.com.sg": "Hao Mart", "redmart.lazada.sg": "RedMart",
@@ -146,9 +147,9 @@ def change(now: float | None, prev: float | None) -> str:
 
 
 def deal_text(r: dict) -> str:
-    """"−43% · was $3.30" when the shelf shows a was-price (one clean line), else the shop's own promo wording."""
+    """"Save 43% · was $3.30" when the shelf shows a was-price (one clean line), else the shop's own promo wording."""
     if r.get("was") and r.get("price") and r["was"] > r["price"]:
-        return f"−{round(100 * (r['was'] - r['price']) / r['was'])}% · was {cards.money(r['was'])}"
+        return f"Save {round(100 * (r['was'] - r['price']) / r['was'])}% · was {cards.money(r['was'])}"
     return r.get("promo") or ""
 
 
@@ -161,16 +162,23 @@ def photo(r: dict, cls: str, em: str) -> str:
 
 
 def cell(r: dict, label: str, brands: list[str], em: str) -> str:
-    """One product card. Row 1: photo, store, price. Row 2: name. Row 3: per-100g + deal, Open ›."""
+    """One product card, all of it one big link: photo | store, name, big price, deal chip + per-100g."""
     dl = deal_text(r)
-    url = esc(safe_url(r["url"]))
-    return (f'<div class="cell" style="--store:{STORE_COLOR.get(r["store"], "#555")}">'
-            f'<a class="cell-link" href="{url}" target="_blank" rel="noopener"><span class="cell-head">{photo(r, "cell-img", em)}'
-            f'<span class="cell-hp"><span class="cell-top"><span class="pill">{esc(r["store"])}</span><span class="cell-label">{esc(label)}</span></span>'
-            f'<span class="cell-price">{cards.money(r["price"])}</span></span></span>'
-            f'<span class="cell-name">{"★ " if cards.is_brand(r, brands) else ""}{esc(r["name"])}</span></a>'
-            f'<span class="cell-actions"><span class="cell-meta">{esc(cards.unit(r))}' + (f' <b>{esc(dl)}</b>' if dl else "") + '</span>'
-            + f'<a class="open" href="{url}" target="_blank" rel="noopener">Open ›</a></span></div>')
+    return (f'<a class="cell" href="{esc(safe_url(r["url"]))}" target="_blank" rel="noopener" style="--store:{STORE_COLOR.get(r["store"], "#555")}">'
+            f'{photo(r, "cell-img", em)}<span class="cell-body">'
+            f'<span class="cell-top"><span class="pill">{esc(r["store"])}</span><span class="cell-label">{esc(label)}</span></span>'
+            f'<span class="cell-name">{"★ " if cards.is_brand(r, brands) else ""}{esc(r["name"])}</span>'
+            f'<span class="cell-price">{cards.money(r["price"])}</span>'
+            f'<span class="cell-meta">' + (f'<b>{esc(dl)}</b>' if dl else "") + f'<i>{esc(cards.unit(r))}</i></span></span></a>')
+
+
+def grid_html(cells: list[str], cls: str = "grid", show: int = SHOW) -> str:
+    """The first `show` cards, the rest folded under one big 'Show N more' button (native <details>: works without script)."""
+    out = f'<div class="{cls}">{"".join(cells[:show])}</div>'
+    if len(cells) > show:
+        out += (f'<details class="more"><summary>Show {len(cells) - show} more</summary>'
+                f'<div class="{cls}">{"".join(cells[show:])}</div></details>')
+    return out
 
 
 def tag_html(w: dict, d: dict, brands: list[str], em: str, kicker: str = "Best value") -> str:
@@ -210,11 +218,11 @@ def staple_panel(pid: str, staple: str, d: dict | None, brands: list[str], steps
     w = d["winner"]
     items = [(o, "best here") for o in d["others"]] + ([(d["deal"], "on offer")] if d["deal"] else [])
     items += [(r, f"#{n}") for n, r in enumerate(d["more"], len(items) + 2)]
-    grid = "".join(cell(r, label, brands, em) for r, label in items)
+    grid = grid_html([cell(r, label, brands, em) for r, label in items], "grid one")
     sub = head + f'Compared {d["count"]} products · cheapest per 100g / 100ml / piece first'
     if d["stock"]:
         sub += f' <span class="stock">💰 Stock up: cheapest in 8 weeks (was {cards.money(d["low"])}{esc(w["unit"])})</span>'
-    return panel(pid, em, staple.title(), zh, sub, f'<div class="shelf">{tag_html(w, d, brands, em)}<div class="grid">{grid}</div></div>', steps)
+    return panel(pid, em, staple.title(), zh, sub, f'<div class="shelf">{tag_html(w, d, brands, em)}<div>{grid}</div></div>', steps, "panel-scroll")
 
 
 def promo_panel(staples: list[str], datas: dict, cfg: dict, new_urls: set[str], steps: str) -> str:
@@ -236,13 +244,13 @@ def promo_panel(staples: list[str], datas: dict, cfg: dict, new_urls: set[str], 
     total = sum(len(i) for _, i in groups)
     order = sorted(stores, key=lambda x: cards.STORE_ORDER.index(x) if x in cards.STORE_ORDER else 99)
     sub = (f"{total} promotions on your staples" + (f" at {', '.join(order)}" if order else "") + (f" · 🆕 {n_new} new today" if n_new else "")
-           + " · flyer deals from the other stores are on each supermarket's page")
+           + " · biggest saving first")
     em = lambda s_: cards.EMOJI.get(s_, "🛒")   # noqa: E731
     cells = "".join(
         f'<h3 class="grp">{em(s_)} {esc(s_.title())}<small>{len(items)} on offer</small></h3>'
-        + "".join(cell(r, ("🆕 " if not old else "") + r["store"], cfg["brands"].get(s_, []), em(s_)) for old, _, r in items)
+        + grid_html([cell(r, "🆕 new today" if not old else "", cfg["brands"].get(s_, []), em(s_)) for old, _, r in items], "grid")
         for s_, items in groups)
-    body = (f'<div class="shelf shelf-store"><div class="grid grid-store grid-auto">{cells}</div></div>' if cells
+    body = (f'<div class="shelf shelf-store"><div>{cells}</div></div>' if cells
             else '<p class="empty">No promotions on your staples right now. New ones show here within a few hours.</p>')
     return panel("promo", "🏷", "Promotions", "促销", sub, body, steps, "panel-scroll")
 
@@ -262,7 +270,7 @@ def most_bought_panel(items: list[str], datas: dict, cfg: dict, steps: str) -> s
                 best.append((r["sold"], s_, r))
     best.sort(key=lambda t: -t[0])
     cells = [cell(r, f"🔥 {sold_text(n)} sold", cfg["brands"].get(s_, []), cards.EMOJI.get(s_, "🛒")) for n, s_, r in best[:10]]
-    body = (f'<div class="shelf shelf-store"><div class="grid grid-store">{"".join(cells)}</div></div>' if cells
+    body = (f'<div class="shelf shelf-store"><div>{grid_html(cells)}</div></div>' if cells
             else '<p class="empty">No sales counts yet: RedMart is read every 3 hours in the daytime.</p>')
     return panel("top", "🔥", "Most bought", "最畅销", "RedMart's best sellers among your items · how many each has sold on RedMart",
                  body, steps)
@@ -298,7 +306,7 @@ def store_panel(pid: str, store: str, staples: list[str], datas: dict, cfg: dict
             cells.append(cell(b, label, cfg["brands"].get(s, []), cards.EMOJI.get(s, "🛒")))
     if cells:
         sub = f"Best value at {esc(store)} for each staple · 🏆 = cheapest of all the stores"
-        body = f'<div class="shelf shelf-store"><div class="grid grid-store">{"".join(cells)}</div></div>'
+        body = f'<div class="shelf shelf-store"><div>{grid_html(cells)}</div></div>'
         extra = ""
     else:
         why = WHY_NO_PRICES.get(store, "no prices were read today")
@@ -468,20 +476,16 @@ TEMPLATE = """<!doctype html>
 :root{{--paper:#f4ead6;--ink:#1f1a14;--muted:#6b5d4a;--chili:#c2391b;--pandan:#2c6e3f;--turmeric:#e6a72a;--card:#fffaf0;--line:#d8c7a4;
   --display:'Fraunces',Georgia,serif;--body:'Atkinson Hyperlegible',system-ui,sans-serif;--zh:'Noto Serif SC',serif;--bar:74px}}
 *{{box-sizing:border-box}}
-body{{margin:0;color:var(--ink);font:1.05rem/1.4 var(--body);background:var(--paper);
+body{{margin:0;color:var(--ink);font:1.2rem/1.45 var(--body);background:var(--paper);
   background-image:radial-gradient(circle at 15% 10%,#fbf3e2 0,transparent 45%),radial-gradient(circle at 90% 60%,#e9d9b8 0,transparent 40%)}}
-body::before{{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;opacity:.3;mix-blend-mode:multiply;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .4 0 0 0 0 .3 0 0 0 0 .2 0 0 0 .25 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}}
 a{{color:inherit}}
 a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-offset:2px}}
-/* top bar: awning strip, title, date, legend */
+/* top bar: awning strip, title, date */
 .awning{{height:12px;background:repeating-linear-gradient(90deg,var(--chili) 0 40px,var(--card) 40px 80px)}}
 .bar{{height:calc(var(--bar) - 12px);display:flex;align-items:center;gap:1.4rem;padding:0 1.2rem;border-bottom:3px double var(--ink)}}
 .bar h1{{margin:0;font:900 2rem/1 var(--display);font-variation-settings:"SOFT" 100,"opsz" 144;letter-spacing:-.02em;white-space:nowrap}}
 .bar h1 em{{color:var(--chili)}} .bar h1 .zh{{font-size:.7em}}
 .fresh{{color:var(--muted);white-space:nowrap}}
-.legend{{margin-left:auto;display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;font-size:.95rem}}
-.legend b{{font-weight:700;color:var(--muted);margin-right:.2rem}}
 .ok{{background:#d9f0dc;color:var(--pandan);font-weight:700;padding:.25rem .7rem;border-radius:8px}}
 .stale{{background:#f8d9d2;color:var(--chili);font-weight:700;padding:.25rem .7rem;border-radius:8px}}
 .chg{{font-size:.9rem;font-weight:700;padding:.12rem .55rem;border-radius:999px;white-space:nowrap}}
@@ -504,16 +508,9 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .fest small{{display:block;font-weight:400;color:var(--muted);font-size:.8rem}}
 .side-h{{font-size:.75rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:.7rem .8rem .1rem}}
 .shelf.shelf-store{{grid-template-columns:1fr}}   /* more specific than the width rules for .shelf/.grid below */
-.grid.grid-store{{grid-template-columns:repeat(5,minmax(0,1fr))}}
-.grid.grid-auto{{grid-auto-rows:auto}}
-.js .shelf:has(.grid-auto){{flex:none}}
 .grp{{grid-column:1/-1;margin:.5rem 0 0;font:800 1.35rem var(--display);border-bottom:2px solid var(--line);padding-bottom:.2rem}}
 .grp:first-child{{margin-top:0}} .grp small{{font:400 .9rem var(--body);color:var(--muted);margin-left:.6rem}}
-.grid-store .pill{{display:none}}   /* every card is the same store: the staple label matters instead */
-.grid-store .cell-label{{font-weight:700;color:var(--ink);font-size:.8rem}}
 @media (max-height:900px){{.side{{gap:.12rem}}.side a{{padding:.28rem .7rem}}.side-h{{margin:.45rem .8rem 0}}}}
-@media (max-width:1100px){{.grid.grid-store{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}
-@media (max-width:899px){{.grid.grid-store{{grid-template-columns:1fr}}}}
 .panel{{padding:.9rem 1.3rem 1rem;display:flex;flex-direction:column;gap:.8rem;min-width:0}}
 .js .panel[hidden]{{display:none}}
 .panel{{animation:rise .45s cubic-bezier(.2,.8,.2,1)}}
@@ -531,7 +528,7 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
   background:var(--card);border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink);white-space:nowrap;transition:transform .15s,box-shadow .15s}}
 .step:hover{{transform:translate(-2px,-2px);box-shadow:5px 5px 0 var(--ink)}}
 /* shelf: price tag + 3x3 grid */
-.shelf{{display:grid;grid-template-columns:330px 1fr;gap:1.2rem;flex:1;min-height:0}}
+.shelf{{display:grid;grid-template-columns:330px 1fr;gap:1.2rem;align-items:start}}
 .tag{{position:relative;display:flex;flex-direction:column;gap:.5rem;padding:1rem 1rem 1rem 2.6rem;background:var(--card);
   border:3px solid var(--ink);border-radius:10px 22px 22px 10px;box-shadow:7px 7px 0 var(--store);transform:rotate(-.8deg);min-height:0}}
 .tag::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:1.5rem;background:var(--store);border-radius:7px 0 0 7px}}
@@ -549,35 +546,35 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .tag-deal{{align-self:flex-start;background:var(--turmeric);font-weight:700;padding:.2rem .7rem;border-radius:6px;transform:rotate(-1.5deg)}}
 .btn{{margin-top:auto;text-align:center;font-weight:700;font-size:1.15rem;padding:.7rem;border-radius:12px;background:var(--ink);color:var(--paper)}}
 .tag-link:hover .btn{{background:var(--store)}}
-.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:minmax(0,1fr);gap:.7rem;min-height:0}}
-.cell{{display:flex;flex-direction:column;background:var(--card);border-radius:14px;border:2px solid var(--line);border-left:7px solid var(--store);
-  padding:.55rem .7rem;min-height:0;overflow:hidden;transition:border-color .2s,box-shadow .2s}}
-.cell:hover .cell-name{{text-decoration:underline}}
+.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.9rem}}
+.cell{{display:flex;gap:.9rem;align-items:center;text-decoration:none;background:var(--card);border-radius:16px;border:2px solid var(--line);
+  border-left:8px solid var(--store);padding:.8rem .9rem;transition:border-color .2s,box-shadow .2s}}
 .cell:hover{{border-color:var(--store);box-shadow:0 8px 18px -10px rgba(60,30,10,.45)}}
-.cell-link{{display:flex;flex-direction:column;gap:.25rem;text-decoration:none;flex:1;min-height:0;overflow:hidden}}
-.cell-link>*{{flex:none}}   /* never squash the name to zero height: the card clips at the bottom instead */
-.cell-head{{display:flex;gap:.6rem;align-items:center}}
-.cell-img{{width:64px;height:64px;flex:none;object-fit:contain;background:#fff;border-radius:10px;border:1px solid #eadfc8;padding:.2rem}}
-.cell-hp{{display:flex;flex-direction:column;gap:.15rem;min-width:0}}
-.cell-top{{display:flex;gap:.4rem;align-items:center;overflow:hidden;white-space:nowrap}}
-.pill{{background:var(--store);color:#fff;font-weight:700;font-size:.75rem;padding:.1rem .55rem;border-radius:999px;white-space:nowrap}}
-.cell-label{{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}}
-.cell-price{{font:800 1.5rem/1 var(--display)}}
-.cell-name{{font-weight:700;font-size:.98rem;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
-.cell-meta{{color:var(--muted);font-size:.88rem;min-width:0;flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
-.cell-meta b{{color:var(--chili);display:inline-block}}
-.open{{font-weight:700;color:var(--store);text-decoration:none;white-space:nowrap;padding:.2rem .1rem}}
+.cell-img{{width:84px;height:84px;flex:none;object-fit:contain;background:#fff;border-radius:12px;border:1px solid #eadfc8;padding:.25rem}}
+.cell-img.emoji{{font-size:2.6rem;overflow:hidden}}
+.cell-body{{display:flex;flex-direction:column;gap:.2rem;min-width:0}}
+.cell-top{{display:flex;gap:.4rem;align-items:center;white-space:nowrap;overflow:hidden}}
+.pill{{background:var(--store);color:#fff;font-weight:700;font-size:.8rem;padding:.1rem .6rem;border-radius:999px;white-space:nowrap}}
+.cell-label{{font-size:.8rem;color:var(--muted);font-weight:700}}
+.cell-name{{font-weight:700;font-size:1.05rem;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
+.cell-price{{font:800 1.9rem/1.1 var(--display)}}
+.cell-meta{{display:flex;flex-wrap:wrap;gap:.1rem .6rem;align-items:center;font-size:.9rem;color:var(--muted)}}
+.cell-meta i{{font-style:normal}}
+.cell-meta b{{background:#d9f0dc;color:var(--pandan);padding:.05rem .55rem;border-radius:8px}}
+.grid.one{{grid-template-columns:1fr}}   /* beside the price tag: one card per row, wide enough to read */
+.more{{margin-top:.9rem}}
+.more summary{{cursor:pointer;list-style:none;text-align:center;font-weight:700;font-size:1.1rem;padding:.8rem;min-height:52px;border-radius:14px;
+  background:var(--card);border:2px dashed var(--ink)}}
+.more summary::-webkit-details-marker{{display:none}}
+.more summary::after{{content:" ▾"}} .more[open] summary::after{{content:" ▴"}}
+.more[open] summary{{margin-bottom:.9rem}}
 .ph-logo{{height:56px;max-width:220px;object-fit:contain;background:#fff;border-radius:12px;padding:.35rem .6rem;border:2px solid var(--line);flex:none}}
 .side-word{{height:24px;max-width:150px;object-fit:contain;object-position:left;vertical-align:middle}}
 .side-logo{{width:26px;height:26px;object-fit:contain;background:#fff;border-radius:6px;vertical-align:middle;margin-right:.15rem}}
 .logo-none{{display:inline-grid;place-items:center;background:var(--store);color:#fff;font-weight:700}}
 .ph-logo.logo-none{{width:56px;font-size:1.8rem}}
 .shop{{display:inline-block;margin-top:.6rem;font-weight:700;text-decoration:none;padding:.6rem 1.1rem;border-radius:999px;background:var(--ink);color:var(--paper)}}
-@media (max-height:800px){{.cell-meta{{-webkit-line-clamp:1}}.cell-img{{width:50px;height:50px}}.cell-img.emoji{{font-size:1.8rem}}.cell-label{{display:none}}.cell-price{{font-size:1.3rem}}
-  .cell{{padding:.4rem .6rem}}.cell-link{{gap:.1rem}}.cell-actions{{padding-top:.1rem}}.cell-name{{font-size:.95rem;line-height:1.2}}
-    .ph h2{{font-size:1.9rem}}.stamp{{width:48px;height:48px;font-size:1.6rem}}}}
-.cell-actions{{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-top:auto;padding-top:.3rem}}
-.tag /* top 10 + flyers */
+/* flyers */
 .flyer-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.8rem}}
 .flyer{{display:grid;gap:.4rem;align-content:start;text-decoration:none;background:var(--card);padding:.8rem;border-radius:12px;border:2px solid var(--ink);box-shadow:4px 4px 0 var(--store)}}
 .flyer:hover{{transform:translate(-2px,-2px)}}
@@ -593,12 +590,11 @@ footer{{color:var(--muted);font-size:.85rem;padding:.3rem 1.3rem .6rem;text-alig
   .js main{{min-height:0;display:flex;flex-direction:column}}
   .js .panel{{flex:1;min-height:0}}
   .js .panel-scroll{{overflow-y:auto}}
-  .js .grid:not(.grid-auto){{grid-template-rows:repeat(3,minmax(0,1fr))}}
 }}
 @media (max-width:1400px){{.app{{grid-template-columns:185px 1fr}}.side a{{padding:.4rem .6rem;font-size:.98rem}}.shelf{{grid-template-columns:265px 1fr}}}}
-@media (max-width:1100px){{.legend{{display:none}}.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media (max-width:1100px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
 @media (max-width:899px){{
-  .bar{{height:auto;flex-wrap:wrap;padding:.6rem 1rem;gap:.4rem 1rem}} .legend{{display:flex;margin-left:0}}
+  .bar{{height:auto;flex-wrap:wrap;padding:.6rem 1rem;gap:.4rem 1rem}}
   .app{{grid-template-columns:1fr}} .side{{flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:2px solid var(--line)}}
   .side a{{background:var(--card);border-color:var(--line)}}
   .shelf{{grid-template-columns:1fr}} .grid{{grid-template-columns:1fr}} .ph{{flex-wrap:wrap}} .steps{{margin-left:0}}
@@ -610,8 +606,6 @@ footer{{color:var(--muted);font-size:.85rem;padding:.3rem 1.3rem .6rem;text-alig
 <header class="bar">
   <h1>Today's <em>Best</em> Buys <span class="zh">今日好价</span></h1>
   <span class="fresh">{fresh}</span>
-  <div class="legend" aria-label="What the marks mean"><b>Key:</b><span class="chg down">▼ cheaper</span><span class="chg up">▲ dearer</span>
-    <span class="chg new">NEW</span><span class="chg star">★ trusted brand</span></div>
 </header>
 <div class="app">
   <nav class="side" aria-label="Categories">{nav}</nav>

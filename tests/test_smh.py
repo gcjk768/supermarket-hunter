@@ -138,7 +138,7 @@ def test_web_page(tmp_path):
     assert "No prices today" in page                                   # tofu has no rows
     assert 'id="st-coldstorage"' in page and "🏆 eggs" in page                # per-supermarket screen
     assert all(f'id="st-{web.slug(x)}"' in page for x in cards.STORE_ORDER)     # every supermarket listed, data or not
-    assert "anti-bot check" in page and 'id="promo"' in page and "−5%" in page.split('id="promo"')[1].split("</section>")[0]
+    assert "anti-bot check" in page and 'id="promo"' in page and "Save 5%" in page.split('id="promo"')[1].split("</section>")[0]
     eggs = page.split('id="s0"')[1].split('id="s1"')[0]
     assert 1 < eggs.count('class="cell"') + 1 <= web.PER_STAPLE                    # winner + more cards, capped
     assert "Prices checked Thu 08 Oct" in page            # the data date, not today
