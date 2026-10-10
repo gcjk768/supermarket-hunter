@@ -146,8 +146,10 @@ def change(now: float | None, prev: float | None) -> str:
 
 
 def deal_text(r: dict) -> str:
-    bits = ([r["promo"]] if r.get("promo") else []) + ([f"was {cards.money(r['was'])}"] if r.get("was") else [])
-    return " · ".join(bits)
+    """"−43% · was $3.30" when the shelf shows a was-price (one clean line), else the shop's own promo wording."""
+    if r.get("was") and r.get("price") and r["was"] > r["price"]:
+        return f"−{round(100 * (r['was'] - r['price']) / r['was'])}% · was {cards.money(r['was'])}"
+    return r.get("promo") or ""
 
 
 def photo(r: dict, cls: str, em: str) -> str:
@@ -167,7 +169,7 @@ def cell(r: dict, label: str, brands: list[str], em: str) -> str:
             f'<span class="cell-hp"><span class="cell-top"><span class="pill">{esc(r["store"])}</span><span class="cell-label">{esc(label)}</span></span>'
             f'<span class="cell-price">{cards.money(r["price"])}</span></span></span>'
             f'<span class="cell-name">{"★ " if cards.is_brand(r, brands) else ""}{esc(r["name"])}</span></a>'
-            f'<span class="cell-actions"><span class="cell-meta">{esc(cards.unit(r))}' + (f' · <b>{esc(dl)}</b>' if dl else "") + '</span>'
+            f'<span class="cell-actions"><span class="cell-meta">{esc(cards.unit(r))}' + (f' <b>{esc(dl)}</b>' if dl else "") + '</span>'
             + f'<a class="open" href="{url}" target="_blank" rel="noopener">Open ›</a></span></div>')
 
 
@@ -217,26 +219,32 @@ def staple_panel(pid: str, staple: str, d: dict | None, brands: list[str], steps
 
 def promo_panel(staples: list[str], datas: dict, cfg: dict, new_urls: set[str], steps: str) -> str:
     """Every current promotion on the staples that is in the same ballpark as the best value (no egg white under eggs),
-    new ones (first seen today) first, then the biggest saving."""
-    seen, items = set(), []
+    grouped under one heading per staple; inside a group new ones (first seen today) first, then the biggest saving."""
+    seen, groups, n_new, stores = set(), [], 0, set()
     for s_ in staples:
-        d = datas.get(s_)
+        d, items = datas.get(s_), []
         for r in (d["rows"] if d else []):
             if (r["promo"] or r["was"]) and r["url"] not in seen and cards.near(r, d["winner"]):
                 seen.add(r["url"])
                 saving = (r["was"] - r["price"]) / r["was"] if r["was"] else 0
-                items.append((r["url"] not in new_urls, -saving, s_, r))
-    items.sort(key=lambda t: t[:2])
-    cells = [cell(r, f"🆕 {s_}" if r["url"] in new_urls else s_, cfg["brands"].get(s_, []), cards.EMOJI.get(s_, "🛒"))
-             for _, _, s_, r in items]
-    n_new = sum(1 for t in items if not t[0])
-    stores = sorted({t[3]["store"] for t in items}, key=lambda x: cards.STORE_ORDER.index(x) if x in cards.STORE_ORDER else 99)
-    sub = (f"{len(items)} promotions on your staples" + (f" at {', '.join(stores)}" if stores else "") + (f" · 🆕 {n_new} new today" if n_new else "")
-           + " · biggest saving first · flyer deals from the other stores are on each supermarket's page")
-    many = len(cells) > 15   # more than one screen: normal-height cards, the panel scrolls
-    body = (f'<div class="shelf shelf-store"><div class="grid grid-store{" grid-auto" if many else ""}">{"".join(cells)}</div></div>' if cells
+                items.append((r["url"] not in new_urls, -saving, r))
+        if items:
+            items.sort(key=lambda t: t[:2])
+            groups.append((s_, items))
+            n_new += sum(1 for t in items if not t[0])
+            stores |= {t[2]["store"] for t in items}
+    total = sum(len(i) for _, i in groups)
+    order = sorted(stores, key=lambda x: cards.STORE_ORDER.index(x) if x in cards.STORE_ORDER else 99)
+    sub = (f"{total} promotions on your staples" + (f" at {', '.join(order)}" if order else "") + (f" · 🆕 {n_new} new today" if n_new else "")
+           + " · flyer deals from the other stores are on each supermarket's page")
+    em = lambda s_: cards.EMOJI.get(s_, "🛒")   # noqa: E731
+    cells = "".join(
+        f'<h3 class="grp">{em(s_)} {esc(s_.title())}<small>{len(items)} on offer</small></h3>'
+        + "".join(cell(r, ("🆕 " if not old else "") + r["store"], cfg["brands"].get(s_, []), em(s_)) for old, _, r in items)
+        for s_, items in groups)
+    body = (f'<div class="shelf shelf-store"><div class="grid grid-store grid-auto">{cells}</div></div>' if cells
             else '<p class="empty">No promotions on your staples right now. New ones show here within a few hours.</p>')
-    return panel("promo", "🏷", "Promotions", "促销", sub, body, steps, "panel-scroll" if many else "")
+    return panel("promo", "🏷", "Promotions", "促销", sub, body, steps, "panel-scroll")
 
 
 def sold_text(n: int) -> str:
@@ -499,6 +507,8 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .grid.grid-store{{grid-template-columns:repeat(5,minmax(0,1fr))}}
 .grid.grid-auto{{grid-auto-rows:auto}}
 .js .shelf:has(.grid-auto){{flex:none}}
+.grp{{grid-column:1/-1;margin:.5rem 0 0;font:800 1.35rem var(--display);border-bottom:2px solid var(--line);padding-bottom:.2rem}}
+.grp:first-child{{margin-top:0}} .grp small{{font:400 .9rem var(--body);color:var(--muted);margin-left:.6rem}}
 .grid-store .pill{{display:none}}   /* every card is the same store: the staple label matters instead */
 .grid-store .cell-label{{font-weight:700;color:var(--ink);font-size:.8rem}}
 @media (max-height:900px){{.side{{gap:.12rem}}.side a{{padding:.28rem .7rem}}.side-h{{margin:.45rem .8rem 0}}}}
@@ -555,7 +565,7 @@ a:focus-visible,button:focus-visible{{outline:4px solid var(--turmeric);outline-
 .cell-price{{font:800 1.5rem/1 var(--display)}}
 .cell-name{{font-weight:700;font-size:.98rem;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
 .cell-meta{{color:var(--muted);font-size:.88rem;min-width:0;flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
-.cell-meta b{{color:var(--chili)}}
+.cell-meta b{{color:var(--chili);display:inline-block}}
 .open{{font-weight:700;color:var(--store);text-decoration:none;white-space:nowrap;padding:.2rem .1rem}}
 .ph-logo{{height:56px;max-width:220px;object-fit:contain;background:#fff;border-radius:12px;padding:.35rem .6rem;border:2px solid var(--line);flex:none}}
 .side-word{{height:24px;max-width:150px;object-fit:contain;object-position:left;vertical-align:middle}}
